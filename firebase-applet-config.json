@@ -1,0 +1,12 @@
+{
+  "projectId": "new-zazzle",
+  "appId": "1:358856200929:web:ffde587c974363fe371da0",
+  "apiKey": "AIzaSyDRBP_vAi0o_ueg68xmcYcAMRrayTO78Ew",
+  "authDomain": "new-zazzle.firebaseapp.com",
+  "firestoreDatabaseId": "(default)",
+  "storageBucket": "new-zazzle.firebasestorage.app",
+  "messagingSenderId": "358856200929",
+  "measurementId": "",
+  "oAuthClientId": "",
+  "recaptchaSiteKey": ""
+}

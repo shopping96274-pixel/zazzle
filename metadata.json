@@ -1,0 +1,6 @@
+{
+  "name": "Zazzel Shopping Store",
+  "description": "Zazzel Shopping Store — An all-in-one verified shopping destination featuring laptops, graphic cards, smartphones, high-performance electronics, appliances, and lifestyle goods.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

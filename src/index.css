@@ -1,0 +1,426 @@
+@import "tailwindcss";
+
+/* Base input styling for light theme */
+input, textarea, select {
+  color: #000000;
+}
+
+input::placeholder, textarea::placeholder {
+  color: #64748b;
+  opacity: 1;
+}
+
+/* Light background inputs */
+input.bg-white,
+textarea.bg-white,
+select.bg-white {
+  color: #000000 !important;
+  -webkit-text-fill-color: #000000 !important;
+}
+
+/* ======================================================== */
+/* 1. SELLER CHAT & ADMIN CHAT - 100% BLACK VISIBLE TEXT     */
+/* ======================================================== */
+#seller-chat-input,
+#seller-chat-input:focus,
+#seller-chat-input:active,
+#admin-chat-input,
+#admin-chat-input:focus,
+#admin-chat-input:active {
+  color: #000000 !important;
+  -webkit-text-fill-color: #000000 !important;
+  caret-color: #000000 !important;
+  font-weight: 500 !important;
+}
+
+#seller-chat-input::placeholder,
+#admin-chat-input::placeholder {
+  color: #64748b !important;
+  -webkit-text-fill-color: #64748b !important;
+  opacity: 1 !important;
+}
+
+/* ======================================================== */
+/* 2. ADMIN DASHBOARD - 100% BLACK VISIBLE TEXT FOR ALL INPUTS */
+/* ======================================================== */
+.admin-dashboard-scope input,
+.admin-dashboard-scope textarea,
+.admin-dashboard-scope select,
+.admin-dashboard-scope input:focus,
+.admin-dashboard-scope textarea:focus,
+.admin-dashboard-scope select:focus,
+.admin-dashboard-scope input:active,
+.admin-dashboard-scope textarea:active,
+.admin-dashboard-scope select:active,
+.admin-dashboard-scope input:hover,
+.admin-dashboard-scope textarea:hover {
+  color: #000000 !important;
+  -webkit-text-fill-color: #000000 !important;
+  caret-color: #000000 !important;
+}
+
+.admin-dashboard-scope input::placeholder,
+.admin-dashboard-scope textarea::placeholder {
+  color: #64748b !important;
+  -webkit-text-fill-color: #64748b !important;
+  opacity: 1 !important;
+}
+
+.admin-dashboard-scope input:-webkit-autofill,
+.admin-dashboard-scope textarea:-webkit-autofill {
+  -webkit-text-fill-color: #000000 !important;
+  -webkit-box-shadow: 0 0 0px 1000px #ffffff inset !important;
+}
+
+/* ======================================================== */
+/* 3. ONLY GENUINE DARK INPUTS GET CRISP WHITE TEXT         */
+/* ======================================================== */
+input.text-white,
+textarea.text-white,
+select.text-white,
+input[class*="text-white"],
+textarea[class*="text-white"],
+input.dark-input,
+textarea.dark-input,
+input.bg-slate-900,
+input.bg-slate-950,
+textarea.bg-slate-900,
+textarea.bg-slate-950,
+input[class*="bg-slate-9"],
+textarea[class*="bg-slate-9"],
+input[class*="bg-zinc-9"],
+textarea[class*="bg-zinc-9"],
+input[class*="bg-black"],
+textarea[class*="bg-black"],
+#seller-invite-code-input {
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+}
+
+/* Placeholders for dark inputs */
+input.text-white::placeholder,
+textarea.text-white::placeholder,
+input[class*="text-white"]::placeholder,
+textarea[class*="text-white"]::placeholder,
+input.dark-input::placeholder,
+textarea.dark-input::placeholder,
+#seller-invite-code-input::placeholder {
+  color: #94a3b8 !important;
+  -webkit-text-fill-color: #94a3b8 !important;
+  opacity: 1;
+}
+
+/* WebKit autofill text color override for dark inputs */
+input.text-white:-webkit-autofill,
+input[class*="text-white"]:-webkit-autofill,
+input.dark-input:-webkit-autofill,
+#seller-invite-code-input:-webkit-autofill {
+  -webkit-text-fill-color: #ffffff !important;
+  -webkit-box-shadow: 0 0 0px 1000px #0f172a inset !important;
+  transition: background-color 5000s ease-in-out 0s;
+}
+
+input.bg-white:-webkit-autofill,
+select.bg-white:-webkit-autofill {
+  -webkit-text-fill-color: #000000 !important;
+}
+
+/* ======================================================== */
+/* 4. SELLER DASHBOARD TICKER MARQUEE - INFINITE SMOOTH SCROLL */
+/* ======================================================== */
+@keyframes ticker-scroll-rtl {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+.animate-ticker-marquee {
+  display: flex;
+  width: max-content;
+  animation: ticker-scroll-rtl 55s linear infinite;
+  will-change: transform;
+  backface-visibility: hidden;
+  perspective: 1000px;
+}
+
+/* ======================================================== */
+/* ======================================================== */
+/* 5. SELLER DASHBOARD WHITE / LIGHT THEME OVERRIDES       */
+/* (Clean, crisp, high-contrast, ultra-sharp card borders) */
+/* ======================================================== */
+.seller-theme-light {
+  background-color: #f8fafc !important;
+  color: #0f172a !important;
+}
+
+/* Sidebar in Light Mode */
+.seller-theme-light aside,
+.seller-theme-light .seller-aside {
+  background-color: #ffffff !important;
+  border-color: #e2e8f0 !important;
+  color: #0f172a !important;
+  box-shadow: 2px 0 12px -2px rgba(15, 23, 42, 0.04) !important;
+}
+
+.seller-theme-light aside .bg-slate-950,
+.seller-theme-light aside .bg-slate-950\/80 {
+  background-color: #f8fafc !important;
+  border-color: #e2e8f0 !important;
+}
+
+/* Header in Light Mode */
+.seller-theme-light header,
+.seller-theme-light .seller-header {
+  background-color: #ffffff !important;
+  border-color: #e2e8f0 !important;
+  color: #0f172a !important;
+  box-shadow: 0 1px 6px -1px rgba(15, 23, 42, 0.05) !important;
+}
+
+/* Workspace Canvas */
+.seller-theme-light .seller-workspace,
+.seller-theme-light .bg-slate-950 {
+  background-color: #f8fafc !important;
+  color: #0f172a !important;
+}
+
+/* Top "Welcome Back" Banner / Seller Info Card */
+.seller-theme-light .bg-gradient-to-r.from-slate-900,
+.seller-theme-light .bg-gradient-to-br.from-slate-900 {
+  background: #ffffff !important;
+  border: 1px solid #e2e8f0 !important;
+  box-shadow: 0 4px 16px -2px rgba(15, 23, 42, 0.05) !important;
+  color: #0f172a !important;
+}
+
+/* All Cards, Blocks, and Metric Containers - Sharp, Clean & Defined */
+.seller-theme-light .bg-slate-950\/80,
+.seller-theme-light .bg-slate-950\/90,
+.seller-theme-light .bg-slate-900,
+.seller-theme-light .bg-slate-900\/90,
+.seller-theme-light .bg-slate-900\/95,
+.seller-theme-light .bg-slate-900\/80,
+.seller-theme-light .bg-slate-900\/60,
+.seller-theme-light .bg-slate-900\/40,
+.seller-theme-light .bg-\[\#141e33\] {
+  background-color: #ffffff !important;
+  border: 1px solid #e2e8f0 !important;
+  box-shadow: 0 1px 3px 0 rgba(15, 23, 42, 0.04), 0 1px 2px -1px rgba(15, 23, 42, 0.04) !important;
+  color: #0f172a !important;
+}
+
+/* Card & Container Borders */
+.seller-theme-light .border-slate-800,
+.seller-theme-light .border-slate-800\/80,
+.seller-theme-light .border-slate-700,
+.seller-theme-light .border-slate-700\/80 {
+  border-color: #e2e8f0 !important;
+}
+
+/* Secondary Buttons, Chips, and Dark Badges in Light Mode */
+.seller-theme-light .bg-slate-800,
+.seller-theme-light .bg-slate-800\/90,
+.seller-theme-light .bg-slate-800\/80,
+.seller-theme-light .bg-slate-800\/60,
+.seller-theme-light .bg-slate-800\/50,
+.seller-theme-light .bg-slate-700,
+.seller-theme-light .bg-slate-700\/80 {
+  background-color: #f1f5f9 !important;
+  border-color: #cbd5e1 !important;
+  color: #1e293b !important;
+}
+
+.seller-theme-light .bg-slate-800:hover,
+.seller-theme-light .bg-slate-700:hover,
+.seller-theme-light .hover\:bg-slate-800:hover,
+.seller-theme-light .hover\:bg-slate-700:hover,
+.seller-theme-light .hover\:bg-slate-850:hover,
+.seller-theme-light .hover\:bg-slate-800\/60:hover,
+.seller-theme-light .hover\:bg-slate-800\/30:hover {
+  background-color: #e2e8f0 !important;
+  color: #0f172a !important;
+}
+
+/* Inner Mini Metric Cards / Stats Boxes */
+.seller-theme-light .grid.grid-cols-2 > div,
+.seller-theme-light .grid.grid-cols-2.lg\:grid-cols-4 > div {
+  background-color: #ffffff !important;
+  border: 1px solid #e2e8f0 !important;
+  box-shadow: 0 2px 8px -1px rgba(15, 23, 42, 0.05) !important;
+}
+
+.seller-theme-light .grid.grid-cols-2 > div:hover,
+.seller-theme-light .grid.grid-cols-2.lg\:grid-cols-4 > div:hover {
+  border-color: #f59e0b !important;
+  box-shadow: 0 4px 14px -2px rgba(245, 158, 11, 0.14) !important;
+}
+
+/* Metric Icon Bubbles in Light Mode */
+.seller-theme-light .bg-amber-400\/15 {
+  background-color: #fef3c7 !important;
+  color: #b45309 !important;
+  border-color: #fde68a !important;
+}
+.seller-theme-light .bg-indigo-500\/15 {
+  background-color: #e0e7ff !important;
+  color: #4338ca !important;
+  border-color: #c7d2fe !important;
+}
+.seller-theme-light .bg-emerald-500\/15 {
+  background-color: #d1fae5 !important;
+  color: #047857 !important;
+  border-color: #a7f3d0 !important;
+}
+.seller-theme-light .bg-sky-500\/15 {
+  background-color: #e0f2fe !important;
+  color: #0284c7 !important;
+  border-color: #bae6fd !important;
+}
+
+/* Typography High Contrast */
+.seller-theme-light .text-white,
+.seller-theme-light h1.text-white,
+.seller-theme-light h2.text-white,
+.seller-theme-light h3.text-white,
+.seller-theme-light h4.text-white,
+.seller-theme-light span.text-white,
+.seller-theme-light p.text-white {
+  color: #0f172a !important;
+}
+
+.seller-theme-light .text-slate-100 {
+  color: #0f172a !important;
+}
+
+.seller-theme-light .text-slate-200,
+.seller-theme-light .text-slate-300 {
+  color: #1e293b !important;
+}
+
+.seller-theme-light .text-slate-400 {
+  color: #64748b !important;
+  font-weight: 500;
+}
+
+.seller-theme-light .text-amber-300 {
+  color: #b45309 !important;
+  font-weight: 800;
+}
+
+.seller-theme-light .divide-slate-800 > :not([hidden]) ~ :not([hidden]) {
+  border-color: #e2e8f0 !important;
+}
+
+/* Inputs, Selects, and Textareas */
+.seller-theme-light input,
+.seller-theme-light select,
+.seller-theme-light textarea {
+  background-color: #ffffff !important;
+  border: 1px solid #cbd5e1 !important;
+  color: #0f172a !important;
+}
+
+.seller-theme-light input:focus,
+.seller-theme-light select:focus,
+.seller-theme-light textarea:focus {
+  border-color: #f59e0b !important;
+  outline: 2px solid rgba(245, 158, 11, 0.2) !important;
+}
+
+.seller-theme-light input::placeholder,
+.seller-theme-light textarea::placeholder {
+  color: #94a3b8 !important;
+}
+
+/* Table styling in Light Mode */
+.seller-theme-light thead th {
+  background-color: #f8fafc !important;
+  color: #475569 !important;
+  border-bottom: 1.5px solid #e2e8f0 !important;
+}
+
+.seller-theme-light tbody tr {
+  border-bottom: 1px solid #f1f5f9 !important;
+}
+
+.seller-theme-light tbody tr:hover {
+  background-color: #f8fafc !important;
+}
+
+/* Primary Action Buttons in Light Mode */
+.seller-theme-light button.bg-amber-400,
+.seller-theme-light .bg-amber-400,
+.seller-theme-light .bg-amber-500 {
+  color: #020617 !important;
+}
+
+/* Preserve bright colored badges and alert text */
+.seller-theme-light .bg-rose-500,
+.seller-theme-light .bg-rose-600,
+.seller-theme-light .bg-emerald-500,
+.seller-theme-light .bg-emerald-600,
+.seller-theme-light .bg-indigo-600,
+.seller-theme-light .bg-blue-600 {
+  color: #ffffff !important;
+}
+
+.seller-theme-light .bg-rose-500 *,
+.seller-theme-light .bg-rose-600 *,
+.seller-theme-light .bg-emerald-500 *,
+.seller-theme-light .bg-emerald-600 * {
+  color: #ffffff !important;
+}
+
+/* Balance Pill in Header */
+.seller-theme-light .bg-slate-950\/80 {
+  background-color: #f8fafc !important;
+  border-color: #e2e8f0 !important;
+}
+
+/* ======================================================== */
+/* SELLER TICKER BAR THEME PRESERVATION                     */
+/* Keep the ticker bar consistently sleek, dark, and smooth */
+/* ======================================================== */
+.seller-ticker-bar-dark,
+.seller-theme-light .seller-ticker-bar-dark {
+  background-color: #020617 !important;
+  border-bottom: 1px solid #1e293b !important;
+  color: #f8fafc !important;
+}
+
+.seller-ticker-bar-dark .ticker-partners-badge,
+.seller-theme-light .seller-ticker-bar-dark .ticker-partners-badge {
+  background-color: #020617 !important;
+}
+
+.seller-ticker-bar-dark .ticker-item-pill,
+.seller-theme-light .seller-ticker-bar-dark .ticker-item-pill {
+  background-color: #0f172a !important;
+  border: 1px solid #1e293b !important;
+  color: #ffffff !important;
+}
+
+.seller-ticker-bar-dark .ticker-item-pill:hover,
+.seller-theme-light .seller-ticker-bar-dark .ticker-item-pill:hover {
+  background-color: #1e293b !important;
+  border-color: rgba(251, 191, 36, 0.4) !important;
+}
+
+.seller-ticker-bar-dark .ticker-brand-text,
+.seller-theme-light .seller-ticker-bar-dark .ticker-brand-text {
+  color: #ffffff !important;
+}
+
+.seller-ticker-bar-dark .ticker-fade-left,
+.seller-theme-light .seller-ticker-bar-dark .ticker-fade-left {
+  background: linear-gradient(to right, #020617, transparent) !important;
+}
+
+.seller-ticker-bar-dark .ticker-fade-right,
+.seller-theme-light .seller-ticker-bar-dark .ticker-fade-right {
+  background: linear-gradient(to left, #020617, transparent) !important;
+}
+
