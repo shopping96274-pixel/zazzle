@@ -422,18 +422,6 @@ function MainAppContent() {
     }
   }, [isSellerFrozen, currentView]);
 
-  // Whenever seller visits store dashboard or storefront, automatically record/update active session
-  useEffect(() => {
-    if (activeSellerProfile && (currentView === 'seller' || currentView === 'shop' || currentView === 'seller-support')) {
-      const activityLabel =
-        currentView === 'seller'
-          ? 'Store Dashboard Active'
-          : currentView === 'shop'
-          ? 'Storefront Visit'
-          : 'Support Visit';
-      trackSellerStoreActivity(activeSellerProfile, activityLabel);
-    }
-  }, [currentView, activeSellerProfile?.id, activeSellerProfile?.email, trackSellerStoreActivity]);
 
   // Router handler with full browser history pushState support
   const handleNavigate = (view: string, id?: string) => {

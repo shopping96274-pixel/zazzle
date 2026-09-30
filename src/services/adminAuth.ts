@@ -18,7 +18,7 @@ export const DEFAULT_ADMIN_EMAIL = 'admin';
 export const DEFAULT_ADMIN_PASSWORD = '1234';
 export const ADMIN_MASTER_RESET_KEY = '9627';
 export const KHAN_SECURITY_PIN = '9627';
-export const SELLER_INVITATION_CODE = '5201';
+export const SELLER_INVITATION_CODE = '74296';
 
 // ============================================================================
 // SECURITY ENFORCEMENT: Client-Side Local Storage Purge
@@ -43,7 +43,7 @@ const FIRESTORE_COLLECTION = 'platform_security';
 const FIRESTORE_DOC = 'admin_auth';
 
 // Standard Firebase Auth canonical email for admin identity (RFC compliant, no forbidden #)
-export const FIREBASE_ADMIN_AUTH_EMAIL = 'admin.security@new-zazzle.firebaseapp.com';
+export const FIREBASE_ADMIN_AUTH_EMAIL = 'admin.security@zazzel-shopping-store-c7bc8.firebaseapp.com';
 
 export function toFirebaseAuthEmail(email: string): string {
   const clean = email.trim().toLowerCase();

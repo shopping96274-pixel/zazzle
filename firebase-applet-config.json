@@ -1,11 +1,11 @@
 {
-  "projectId": "new-zazzle",
-  "appId": "1:358856200929:web:ffde587c974363fe371da0",
-  "apiKey": "AIzaSyDRBP_vAi0o_ueg68xmcYcAMRrayTO78Ew",
-  "authDomain": "new-zazzle.firebaseapp.com",
+  "projectId": "zazzel-shopping-store-c7bc8",
+  "appId": "1:646343495494:web:fe9a31ff8f56a05fc49f47",
+  "apiKey": "AIzaSyBgbOOH3QmUnl6NCgmm4h-k8NemJBSjylM",
+  "authDomain": "zazzel-shopping-store-c7bc8.firebaseapp.com",
   "firestoreDatabaseId": "(default)",
-  "storageBucket": "new-zazzle.firebasestorage.app",
-  "messagingSenderId": "358856200929",
+  "storageBucket": "zazzel-shopping-store-c7bc8.firebasestorage.app",
+  "messagingSenderId": "646343495494",
   "measurementId": "",
   "oAuthClientId": "",
   "recaptchaSiteKey": ""

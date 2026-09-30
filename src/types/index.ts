@@ -153,9 +153,10 @@ export interface SellerLoginSession {
   deviceCategory?: 'mobile' | 'tablet' | 'desktop';
   browser: string;
   userAgent: string;
-  ip: string;
-  location: string;
+  ip?: string;
+  location?: string;
   loginTime: string;
+  visitedAt?: string;
   timestamp: number;
   activityType?: string;
   lastActiveTime?: string;
@@ -256,6 +257,9 @@ export interface Order {
   pickedAt?: string;
   costDeductedFromSeller?: boolean;
   costDeductedAmount?: number;
+  costRefunded?: boolean;
+  cancelledAt?: string;
+  cancelReason?: string;
   source?: string;
   timeline: OrderTimelineEvent[];
   customerNotes?: string;
@@ -302,6 +306,7 @@ export interface WithdrawalRequest {
   status: WithdrawalStatus;
   requestedAt: string;
   processedAt?: string;
+  createdAt?: string;
 }
 
 export interface Message {

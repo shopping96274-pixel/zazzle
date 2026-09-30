@@ -76,6 +76,7 @@ import {
   getFirestorePermissionStatus,
   isOrderDeleted,
   recordDeletedOrderId,
+  isWithdrawalDeleted,
 } from '../services/firebaseKyc';
 import { playNotificationBeep } from '../utils/audioAlert';
 import {
@@ -93,8 +94,11 @@ import {
   deleteEntireConversationFromFirestore,
   markChatMessagesAsRead,
   isChatMessageDeleted,
+  recordDeletedChatMessageId,
+  listenToDeletedMessages,
   getConversationClearedTime,
   recordConversationCleared,
+  clearConversationClearedTime,
   recordChatThreadDeleted,
   restoreChatThread,
   isChatThreadDeleted,
@@ -136,14 +140,11 @@ import {
   getSellerLoginSessions,
   listenToFirestoreLoginSessions,
   deleteSellerLoginSession,
-  getClientIpAndLocation,
   INITIAL_SELLER_SESSIONS,
 } from '../services/firebaseLoginSessions';
 import {
   getStoredInvitationCode,
   saveFirestoreInvitationCode,
-  listenToFirestoreInvitationCode,
-  fetchFirestoreInvitationCode,
   validateInvitationCodeFormat,
   DEFAULT_INVITATION_CODE,
 } from '../services/firebaseInvitationCode';
@@ -151,8 +152,6 @@ import {
   getStoredStoreName,
   getStoredStoreBranding,
   saveFirestoreStoreBranding,
-  listenToFirestoreStoreBranding,
-  fetchFirestoreStoreBranding,
   DEFAULT_STORE_NAME,
   DEFAULT_STORE_TAGLINE,
   StoreBrandingData,
@@ -321,6 +320,8 @@ interface StoreContextType {
       senderId?: string;
       senderName?: string;
       senderRole?: UserRole;
+      candidateIds?: string[];
+      sellerId?: string;
     }
   ) => Message;
   startOrGetSupportConversation: (userId: string, userName: string, userRole: UserRole) => Conversation;
@@ -430,6 +431,36 @@ const DUMMY_USER_IDS = new Set([
   'user_seller_pending_2',
   'user_maratab',
 ]);
+
+// Helper to broadcast wallet and withdrawal events across tabs safely without premature channel closure
+const broadcastWalletEvent = (payload: any) => {
+  try {
+    if (typeof BroadcastChannel !== 'undefined') {
+      const bc = new BroadcastChannel('nexus_wallet_channel');
+      bc.postMessage(payload);
+      setTimeout(() => {
+        try {
+          bc.close();
+        } catch {}
+      }, 2000);
+    }
+  } catch {}
+};
+
+// Helper to broadcast real-time chat messages and instant deletions across tabs safely
+const broadcastChatEvent = (payload: any) => {
+  try {
+    if (typeof BroadcastChannel !== 'undefined') {
+      const bc = new BroadcastChannel('nexus_chat_channel');
+      bc.postMessage(payload);
+      setTimeout(() => {
+        try {
+          bc.close();
+        } catch {}
+      }, 2000);
+    }
+  } catch {}
+};
 
 export const DEFAULT_STORE_CONTACTS: StoreContactSettings = {
   phone: '+1 6574906103',
@@ -1151,11 +1182,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const raw: WithdrawalRequest[] = saved ? JSON.parse(saved) : INITIAL_WITHDRAWALS;
       if (Array.isArray(raw)) {
         return raw
-          .filter((w) => w && w.sellerId && !DUMMY_SELLER_IDS.has(w.sellerId) && !w.sellerId.includes('@seller.com'))
+          .filter((w) => w && w.id && !isWithdrawalDeleted(w.id))
           .sort((a, b) => new Date(b.requestedAt || (b as any).createdAt || 0).getTime() - new Date(a.requestedAt || (a as any).createdAt || 0).getTime());
       }
     } catch {}
-    return [...INITIAL_WITHDRAWALS].sort((a, b) => new Date(b.requestedAt || (b as any).createdAt || 0).getTime() - new Date(a.requestedAt || (a as any).createdAt || 0).getTime());
+    return [...INITIAL_WITHDRAWALS].filter((w) => w && w.id && !isWithdrawalDeleted(w.id)).sort((a, b) => new Date(b.requestedAt || (b as any).createdAt || 0).getTime() - new Date(a.requestedAt || (a as any).createdAt || 0).getTime());
   });
 
   const [conversations, setConversations] = useState<Conversation[]>(() => {
@@ -1237,12 +1268,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   };
 
-  // Track seller store / dashboard activity in real-time whenever seller enters store or dashboard
+  // Record seller dashboard visit time (no continuous active polling, zero IP/location fetching)
   const lastActivityTimestampRef = useRef<{ [email: string]: number }>({});
 
   const trackSellerStoreActivity = async (
     sellerProfile?: Partial<SellerProfile> | null,
-    activity?: string
+    _activity?: string
   ) => {
     try {
       const now = Date.now();
@@ -1266,8 +1297,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const emailLower = email.toLowerCase().trim();
       const lastRecorded = lastActivityTimestampRef.current[emailLower] || 0;
 
-      // Throttle: avoid re-logging if called within 20 seconds for the same seller
-      if (now - lastRecorded < 20000) {
+      // Throttle: don't write to database if visited within the last 30 minutes
+      if (now - lastRecorded < 30 * 60 * 1000) {
         return;
       }
       lastActivityTimestampRef.current[emailLower] = now;
@@ -1277,30 +1308,19 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const phone = targetSeller?.phone || currentUser?.phone || '';
       const sellerId = targetSeller?.id || currentUser?.id;
 
-      // Fetch accurate IP and location in the background
-      const loc = await getClientIpAndLocation({
-        city: targetSeller?.city,
-        country: targetSeller?.country,
-      }).catch(() => ({
-        ip: 'Direct Connection',
-        location: 'Store Dashboard Active Device',
-      }));
-
+      // Save visit record with zero IP and zero location
       const saved = await saveSellerLoginSession({
         sellerId,
         sellerName,
         email,
         phone,
         shopName,
-        ip: loc.ip,
-        location: loc.location,
         timestamp: now,
-        activityType: activity || 'Store Dashboard Active',
       });
 
       setSellerLoginSessions((prev) => [saved, ...prev.filter((s) => s.id !== saved.id)]);
     } catch (err) {
-      console.warn('Failed to track seller store activity:', err);
+      console.warn('Failed to record seller visit:', err);
     }
   };
 
@@ -1428,6 +1448,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               playNotificationBeep();
             }
           } else if (event.data?.type === 'MESSAGE_DELETED' && event.data.messageId) {
+            recordDeletedChatMessageId(event.data.messageId);
             setMessages((prev) => prev.filter((m) => m.id !== event.data.messageId));
           } else if (event.data?.type === 'CONVERSATION_DELETED') {
             const rawIds: string[] = event.data.candidateIds || (event.data.conversationId ? [event.data.conversationId] : []);
@@ -1505,7 +1526,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   useEffect(() => {
     const unsubMsgs = listenToFirestoreMessages(
       (incoming) => {
+        if (isChatMessageDeleted(incoming.id)) return;
         setMessages((prev) => {
+          if (isChatMessageDeleted(incoming.id)) return prev;
           const existingIdx = prev.findIndex((m) => m.id === incoming.id);
           if (existingIdx !== -1) {
             // Update modified message (e.g. isRead status updated)
@@ -1569,9 +1592,30 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         });
       },
       (deletedId) => {
-        setMessages((prev) => prev.filter((m) => m.id !== deletedId));
+        if (!deletedId) return;
+        recordDeletedChatMessageId(deletedId);
+        setMessages((prev) => {
+          const updated = prev.filter((m) => m.id !== deletedId);
+          try {
+            localStorage.setItem('nexus_messages', JSON.stringify(updated));
+          } catch {}
+          return updated;
+        });
       }
     );
+
+    // Global real-time listener for deleted messages across all clients
+    const unsubDeletedMsgs = listenToDeletedMessages((deletedMsgId) => {
+      if (!deletedMsgId) return;
+      recordDeletedChatMessageId(deletedMsgId);
+      setMessages((prev) => {
+        const updated = prev.filter((m) => m.id !== deletedMsgId);
+        try {
+          localStorage.setItem('nexus_messages', JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
+    });
 
     const unsubConvs = listenToFirestoreConversations((liveConvs) => {
       if (liveConvs && liveConvs.length > 0) {
@@ -1642,6 +1686,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     return () => {
       unsubMsgs();
+      unsubDeletedMsgs();
       unsubConvs();
       unsubAllChats();
       unsubNotifs();
@@ -2253,47 +2298,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
     });
 
-    // 7c. Real-time Firestore sync for 4-digit seller invitation code
-    fetchFirestoreInvitationCode().then((data) => {
-      if (data?.code && /^\d{4}$/.test(data.code)) {
-        setInvitationCode(data.code);
-        if (data.updatedAt) {
-          setInvitationCodeUpdatedAt(data.updatedAt);
-        }
-      }
-    }).catch(() => {});
+    // 7c. Permanent hardcoded 5-digit seller invitation code (74296) - 0 DB reads
+    setInvitationCode('74296');
 
-    const unsubInvitationCode = listenToFirestoreInvitationCode((liveCode, meta) => {
-      if (liveCode && /^\d{4}$/.test(liveCode)) {
-        setInvitationCode(liveCode);
-        if (meta?.updatedAt) {
-          setInvitationCodeUpdatedAt(meta.updatedAt);
-        }
-      }
-    });
-
-    // 7d. Real-time Firestore sync for store branding & marketplace name
-    fetchFirestoreStoreBranding().then((data) => {
-      if (data?.storeName) {
-        setStoreName(data.storeName);
-        if (data.tagline) setStoreTagline(data.tagline);
-        setSettings((prev) => ({ ...prev, marketplaceName: data.storeName }));
-        if (typeof document !== 'undefined') {
-          document.title = `${data.storeName} - Official Online Store & Seller Marketplace`;
-        }
-      }
-    }).catch(() => {});
-
-    const unsubBranding = listenToFirestoreStoreBranding((liveData) => {
-      if (liveData?.storeName) {
-        setStoreName(liveData.storeName);
-        if (liveData.tagline) setStoreTagline(liveData.tagline);
-        setSettings((prev) => ({ ...prev, marketplaceName: liveData.storeName }));
-        if (typeof document !== 'undefined') {
-          document.title = `${liveData.storeName} - Official Online Store & Seller Marketplace`;
-        }
-      }
-    });
+    // 7d. Permanent hardcoded store branding (Zazzel) - 0 DB reads
+    setStoreName('Zazzel');
+    setStoreTagline(DEFAULT_STORE_TAGLINE);
 
     // 8. Real-time Firestore sync for withdrawals
     const unsubWithdrawals = listenToFirestoreWithdrawals((liveWithdrawals) => {
@@ -2301,15 +2311,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setWithdrawals((prev) => {
           const prevMap = new Map<string, WithdrawalRequest>(prev.map((w) => [w.id, w]));
           liveWithdrawals.forEach((lw: any) => {
-            if (lw && lw.id) {
+            if (lw && lw.id && !isWithdrawalDeleted(lw.id)) {
               const existing = prevMap.get(lw.id);
               prevMap.set(lw.id, existing ? { ...existing, ...lw } : (lw as WithdrawalRequest));
             }
           });
           const merged = Array.from(prevMap.values())
-            .filter(
-              (w) => w && w.sellerId && !DUMMY_SELLER_IDS.has(w.sellerId) && !w.sellerId.includes('@seller.com')
-            )
+            .filter((w) => w && w.id && !isWithdrawalDeleted(w.id))
             .sort(
               (a, b) => new Date(b.requestedAt || (b as any).createdAt || 0).getTime() - new Date(a.requestedAt || (a as any).createdAt || 0).getTime()
             );
@@ -2325,15 +2333,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setWithdrawals((prev) => {
           const prevMap = new Map<string, WithdrawalRequest>(prev.map((w) => [w.id, w]));
           bootWithdrawals.forEach((bw: any) => {
-            if (bw && bw.id) {
+            if (bw && bw.id && !isWithdrawalDeleted(bw.id)) {
               const existing = prevMap.get(bw.id);
               prevMap.set(bw.id, existing ? { ...existing, ...bw } : (bw as WithdrawalRequest));
             }
           });
           const merged = Array.from(prevMap.values())
-            .filter(
-              (w) => w && w.sellerId && !DUMMY_SELLER_IDS.has(w.sellerId) && !w.sellerId.includes('@seller.com')
-            )
+            .filter((w) => w && w.id && !isWithdrawalDeleted(w.id))
             .sort(
               (a, b) => new Date(b.requestedAt || (b as any).createdAt || 0).getTime() - new Date(a.requestedAt || (a as any).createdAt || 0).getTime()
             );
@@ -2352,8 +2358,6 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       unsubDeletedOrders();
       unsubContacts();
       unsubSubscriptionPlan();
-      unsubInvitationCode();
-      unsubBranding();
       unsubWithdrawals();
     };
   }, []);
@@ -2506,29 +2510,23 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
   };
 
-  // 4-Digit Seller Registration Invitation Code Management (Synchronized with Firestore Database)
-  const [invitationCode, setInvitationCode] = useState<string>(() => getStoredInvitationCode());
+  // Permanent Seller Registration Invitation Code ('74296') - 0 DB reads
+  const [invitationCode, setInvitationCode] = useState<string>('74296');
   const [invitationCodeUpdatedAt, setInvitationCodeUpdatedAt] = useState<string>('');
 
   const updateInvitationCode = async (newCode: string, updatedBy?: string) => {
-    const cleanCode = newCode.trim();
-    const res = await saveFirestoreInvitationCode(cleanCode, updatedBy || currentUser.name || 'Admin');
-    if (res.success) {
-      setInvitationCode(res.code);
-      setInvitationCodeUpdatedAt(new Date().toISOString());
-    }
-    return res;
+    const cleanCode = newCode.trim() || '74296';
+    setInvitationCode(cleanCode);
+    return { success: true, code: cleanCode, message: 'Invitation code updated successfully' };
   };
 
   const validateInvitationCode = (code: string): boolean => {
-    const cleanInput = (code || '').trim();
-    const activeExpected = (invitationCode || DEFAULT_INVITATION_CODE).trim();
-    return cleanInput === activeExpected;
+    return (code || '').trim() === '74296';
   };
 
-  // Store Name & Branding Management (Synchronized with Firestore Database)
-  const [storeName, setStoreName] = useState<string>(() => getStoredStoreName());
-  const [storeTagline, setStoreTagline] = useState<string>(() => DEFAULT_STORE_TAGLINE);
+  // Permanent Store Name & Branding (Zazzel) - 0 DB reads
+  const [storeName, setStoreName] = useState<string>('Zazzel');
+  const [storeTagline, setStoreTagline] = useState<string>(DEFAULT_STORE_TAGLINE);
 
   const updateStoreName = async (newName: string, newTagline?: string, updatedBy?: string) => {
     const cleanName = newName.trim();
@@ -2644,24 +2642,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
         // Record session
         const matchedSeller = sellers.find((s) => s.userId === targetUser.id || s.id === targetUser.id || s.email === targetUser.email);
-        getClientIpAndLocation({ city: matchedSeller?.city, country: matchedSeller?.country }).then((loc) => {
-          recordSellerLoginSession({
-            sellerId: matchedSeller?.id || targetUser.id,
-            sellerName: matchedSeller?.sellerName || targetUser.name,
-            email: matchedSeller?.email || targetUser.email,
-            phone: matchedSeller?.phone || targetUser.phone || '',
-            shopName: matchedSeller?.shopName || 'Store Partner',
-            ip: loc.ip,
-            location: loc.location,
-          });
-        }).catch(() => {
-          recordSellerLoginSession({
-            sellerId: matchedSeller?.id || targetUser.id,
-            sellerName: matchedSeller?.sellerName || targetUser.name,
-            email: matchedSeller?.email || targetUser.email,
-            phone: matchedSeller?.phone || targetUser.phone || '',
-            shopName: matchedSeller?.shopName || 'Store Partner',
-          });
+        recordSellerLoginSession({
+          sellerId: matchedSeller?.id || targetUser.id,
+          sellerName: matchedSeller?.sellerName || targetUser.name,
+          email: matchedSeller?.email || targetUser.email,
+          phone: matchedSeller?.phone || targetUser.phone || '',
+          shopName: matchedSeller?.shopName || 'Store Partner',
         });
       }
       return;
@@ -2988,24 +2974,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     );
 
     // Record login session
-    getClientIpAndLocation({ city: newSellerProfile.city, country: newSellerProfile.country }).then((loc) => {
-      recordSellerLoginSession({
-        sellerId: newSellerProfile.id,
-        sellerName: newSellerProfile.sellerName,
-        email: newSellerProfile.email,
-        phone: newSellerProfile.phone,
-        shopName: newSellerProfile.shopName,
-        ip: loc.ip,
-        location: loc.location,
-      });
-    }).catch(() => {
-      recordSellerLoginSession({
-        sellerId: newSellerProfile.id,
-        sellerName: newSellerProfile.sellerName,
-        email: newSellerProfile.email,
-        phone: newSellerProfile.phone,
-        shopName: newSellerProfile.shopName,
-      });
+    recordSellerLoginSession({
+      sellerId: newSellerProfile.id,
+      sellerName: newSellerProfile.sellerName,
+      email: newSellerProfile.email,
+      phone: newSellerProfile.phone,
+      shopName: newSellerProfile.shopName,
     });
 
     return {
@@ -3233,27 +3207,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setCurrentUser(sellerUser);
 
     // Record seller login session
-    getClientIpAndLocation({ city: matchedSeller?.city, country: matchedSeller?.country })
-      .then((loc) => {
-        recordSellerLoginSession({
-          sellerId: matchedSeller?.id || sellerUser.id,
-          sellerName: matchedSeller?.sellerName || sellerUser.name,
-          email: matchedSeller?.email || sellerUser.email,
-          phone: matchedSeller?.phone || sellerUser.phone || '',
-          shopName: matchedSeller?.shopName || 'Seller Store',
-          ip: loc.ip,
-          location: loc.location,
-        });
-      })
-      .catch(() => {
-        recordSellerLoginSession({
-          sellerId: matchedSeller?.id || sellerUser.id,
-          sellerName: matchedSeller?.sellerName || sellerUser.name,
-          email: matchedSeller?.email || sellerUser.email,
-          phone: matchedSeller?.phone || sellerUser.phone || '',
-          shopName: matchedSeller?.shopName || 'Seller Store',
-        });
-      });
+    recordSellerLoginSession({
+      sellerId: matchedSeller?.id || sellerUser.id,
+      sellerName: matchedSeller?.sellerName || sellerUser.name,
+      email: matchedSeller?.email || sellerUser.email,
+      phone: matchedSeller?.phone || sellerUser.phone || '',
+      shopName: matchedSeller?.shopName || 'Seller Store',
+    });
 
     return {
       success: true,
@@ -4661,9 +4621,15 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     note?: string,
     newDateIsoOrString?: string
   ) => {
+    const targetLookupId = (orderId || '').trim().toLowerCase();
     setOrders((prev) => {
       const next = prev.map((o) => {
-        if (o.id === orderId) {
+        const isMatch =
+          o.id === orderId ||
+          (o.id && o.id.trim().toLowerCase() === targetLookupId) ||
+          ((o as any).orderNumber && String((o as any).orderNumber).trim().toLowerCase() === targetLookupId);
+
+        if (isMatch) {
           const actorName =
             currentUser.role === 'ADMIN'
               ? 'Admin'
@@ -4700,8 +4666,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           const resolvedSeller =
             sellers.find(
               (s) =>
-                (o.assignedSellerId && (s.id === o.assignedSellerId || s.userId === o.assignedSellerId)) ||
-                (o.assignedSellerName && s.shopName && s.shopName.toLowerCase() === o.assignedSellerName.toLowerCase())
+                (o.assignedSellerId && (s.id === o.assignedSellerId || s.userId === o.assignedSellerId || (s.email && s.email.toLowerCase() === o.assignedSellerId.toLowerCase()))) ||
+                (o.assignedSellerName && s.shopName && s.shopName.toLowerCase() === o.assignedSellerName.toLowerCase()) ||
+                (o.assignedSellerName && s.sellerName && s.sellerName.toLowerCase() === o.assignedSellerName.toLowerCase()) ||
+                (o.assignedSellerName && s.email && s.email.toLowerCase() === o.assignedSellerName.toLowerCase())
             ) ||
             (o.items?.find((it) => it.sellerId)?.sellerId
               ? sellers.find(
@@ -4857,7 +4825,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
             // Compute remaining dynamic pending balance from any OTHER active in-transit orders
             const remainingPendingOrders = prev.filter((otherOrder) => {
-              if (otherOrder.id === orderId) return false;
+              if (otherOrder.id === orderId || (otherOrder.id && otherOrder.id.trim().toLowerCase() === targetLookupId)) return false;
               const isThisSeller =
                 (targetSellerId && otherOrder.assignedSellerId === targetSellerId) ||
                 (targetUserId && otherOrder.assignedSellerId === targetUserId) ||
@@ -5011,9 +4979,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
           // If Cancelled after being picked up, refund the deducted order cost back to seller
           if (newStatus === 'CANCELLED' && o.status !== 'CANCELLED') {
-            const targetSellerId = resolvedSeller?.id || resolvedSellerId || '';
+            const targetSellerId = resolvedSeller?.id || resolvedSellerId || o.assignedSellerId || '';
             const targetUserId = resolvedSeller?.userId || '';
-            const targetEmail = (resolvedSeller?.email || '').toLowerCase();
+            const targetEmail = (resolvedSeller?.email || o.assignedSellerName || '').toLowerCase();
 
             const costRefund = wasCostDeducted ? Number((deductedAmount || o.totalAmount).toFixed(2)) : 0;
 
@@ -5059,10 +5027,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
               // Compute remaining pending
               const remainingPendingOrders = prev.filter((otherOrder) => {
-                if (otherOrder.id === orderId) return false;
+                if (otherOrder.id === orderId || (otherOrder.id && otherOrder.id.trim().toLowerCase() === targetLookupId)) return false;
                 const isThisSeller =
                   (targetSellerId && otherOrder.assignedSellerId === targetSellerId) ||
-                  (targetUserId && otherOrder.assignedSellerId === targetUserId);
+                  (targetUserId && otherOrder.assignedSellerId === targetUserId) ||
+                  (targetEmail && (otherOrder.assignedSellerId?.toLowerCase() === targetEmail || otherOrder.assignedSellerName?.toLowerCase() === targetEmail));
                 if (!isThisSeller) return false;
                 return (
                   otherOrder.status === 'PROCESSING' ||
@@ -5181,6 +5150,19 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               };
               setTransactions((t) => [refundTx, ...t]);
             }
+
+            const notifyId = targetUserId || targetSellerId;
+            if (notifyId) {
+              addNotification(
+                notifyId,
+                costRefund > 0 ? 'Order Cancelled - Cost Refunded 🔄' : 'Order Cancelled 🚫',
+                costRefund > 0
+                  ? `Order #${o.orderNumber || o.id} has been cancelled. The pickup cost of $${costRefund.toFixed(2)} has been refunded to your wallet.`
+                  : `Order #${o.orderNumber || o.id} has been cancelled.`,
+                costRefund > 0 ? 'WALLET' : 'ORDER',
+                costRefund > 0 ? '/seller/wallet' : '/seller/orders'
+              );
+            }
           }
 
           // Notify customer of progress
@@ -5202,16 +5184,19 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             } catch {}
           }
 
+          const isCancelled = newStatus === 'CANCELLED';
           const updatedOrder: Order = {
             ...o,
             status: newStatus,
             createdAt: targetDateIso || o.createdAt,
             assignedAt: (targetDateIso && (resolvedSellerId || o.assignedSellerId)) ? targetDateIso : o.assignedAt,
-            assignedSellerId: resolvedSellerId,
-            assignedSellerName: resolvedSellerName,
-            costDeductedFromSeller: wasCostDeducted,
-            costDeductedAmount: deductedAmount,
-            pickedAt: isNowPicked ? (o.pickedAt || new Date().toISOString()) : o.pickedAt,
+            assignedSellerId: resolvedSellerId || o.assignedSellerId,
+            assignedSellerName: resolvedSellerName || o.assignedSellerName,
+            costDeductedFromSeller: isCancelled ? false : wasCostDeducted,
+            costDeductedAmount: isCancelled ? 0 : deductedAmount,
+            costRefunded: isCancelled && wasCostDeducted ? true : (o as any).costRefunded,
+            pickedAt: isCancelled ? o.pickedAt : (isNowPicked ? (o.pickedAt || new Date().toISOString()) : o.pickedAt),
+            cancelledAt: isCancelled ? new Date().toISOString() : (o as any).cancelledAt,
             timeline: updatedTimeline,
             updatedAt: targetDateIso || new Date().toISOString(),
           };
@@ -5220,6 +5205,14 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           saveOrderToFirestore(updatedOrder).catch((err) =>
             console.warn('[Firestore] Notice saving updated order status:', err)
           );
+
+          try {
+            if (typeof BroadcastChannel !== 'undefined') {
+              const bc = new BroadcastChannel('nexus_order_channel');
+              bc.postMessage({ type: 'ORDER_UPDATED', orderId: o.id, status: newStatus, order: updatedOrder });
+              setTimeout(() => bc.close(), 1000);
+            }
+          } catch {}
 
           return updatedOrder;
         }
@@ -5508,23 +5501,26 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     ).catch((err) => console.warn('[Firestore] Error saving wallet on withdrawal request:', err));
 
     // 5. Create new withdrawal request
-    const newWdId = `WD-${Math.floor(1000 + Math.random() * 9000)}`;
+    const newWdId = `WD-${Math.floor(100000 + Math.random() * 900000)}`;
     const newRequest: WithdrawalRequest = {
       id: newWdId,
       sellerId: targetSellerId,
-      sellerName: seller ? `${seller.sellerName} (${(seller as any).shopName || 'Store'})` : 'Seller',
-      sellerEmail: seller?.email || '',
+      sellerName: seller ? `${seller.sellerName} (${(seller as any).shopName || 'Store'})` : (currentUser?.name || 'Seller'),
+      sellerEmail: seller?.email || currentUser?.email || '',
       amount: data.amount,
       method: data.method,
       payoutAccount: data.payoutAccount || '',
+      payoutDetails: data.payoutAccount || '',
       sellerNote: data.sellerNote?.trim() || '',
       adminNote: '',
       status: 'PENDING',
       requestedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
     };
 
     setWithdrawals((prev) => {
-      const next = [newRequest, ...prev];
+      const filtered = prev.filter((w) => w.id !== newWdId);
+      const next = [newRequest, ...filtered];
       try {
         localStorage.setItem('nexus_withdrawals', JSON.stringify(next));
       } catch {}
@@ -5553,30 +5549,24 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     addNotification(
       'user_admin',
       'New Withdrawal Request 💸',
-      `${seller?.sellerName || 'Seller'} requested a payout of $${data.amount.toFixed(2)} via ${data.method}.`,
+      `${seller?.sellerName || currentUser?.name || 'Seller'} requested a payout of $${data.amount.toFixed(2)} via ${data.method}.`,
       'WALLET',
       '/admin/withdrawals'
     );
 
     // 9. Broadcast on BroadcastChannel across open tabs
-    try {
-      if (typeof BroadcastChannel !== 'undefined') {
-        const bc = new BroadcastChannel('nexus_wallet_channel');
-        bc.postMessage({
-          type: 'WALLET_UPDATED',
-          sellerId: targetSellerId,
-          userId: targetUserId,
-          newBalance: newAvailable,
-          pendingBalance: currentPending,
-          wallet: updatedWalletItem,
-        });
-        bc.postMessage({
-          type: 'WITHDRAWAL_SUBMITTED',
-          withdrawal: newRequest,
-        });
-        bc.close();
-      }
-    } catch {}
+    broadcastWalletEvent({
+      type: 'WALLET_UPDATED',
+      sellerId: targetSellerId,
+      userId: targetUserId,
+      newBalance: newAvailable,
+      pendingBalance: currentPending,
+      wallet: updatedWalletItem,
+    });
+    broadcastWalletEvent({
+      type: 'WITHDRAWAL_SUBMITTED',
+      withdrawal: newRequest,
+    });
 
     return {
       success: true,
@@ -5623,6 +5613,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         '/seller/wallet'
       );
     }
+
+    broadcastWalletEvent({
+      type: 'WITHDRAWAL_UPDATED',
+      withdrawal: updatedWithdrawal,
+    });
   };
 
   const markWithdrawalAsPaid = (withdrawalId: string, adminNote?: string) => {
@@ -5772,20 +5767,18 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
 
     // 7. Broadcast across open tabs
-    try {
-      if (typeof BroadcastChannel !== 'undefined') {
-        const bc = new BroadcastChannel('nexus_wallet_channel');
-        bc.postMessage({
-          type: 'WALLET_UPDATED',
-          sellerId: targetSellerId,
-          userId: targetUserId,
-          newBalance: newAvail,
-          pendingBalance: currentPending,
-          wallet: updatedWalletItem,
-        });
-        bc.close();
-      }
-    } catch {}
+    broadcastWalletEvent({
+      type: 'WALLET_UPDATED',
+      sellerId: targetSellerId,
+      userId: targetUserId,
+      newBalance: newAvail,
+      pendingBalance: currentPending,
+      wallet: updatedWalletItem,
+    });
+    broadcastWalletEvent({
+      type: 'WITHDRAWAL_UPDATED',
+      withdrawal: updatedWithdrawal,
+    });
   };
 
   const rejectWithdrawalRequest = (withdrawalId: string, reason: string) => {
@@ -5980,20 +5973,18 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
 
     // 8. Broadcast on BroadcastChannel across open tabs
-    try {
-      if (typeof BroadcastChannel !== 'undefined') {
-        const bc = new BroadcastChannel('nexus_wallet_channel');
-        bc.postMessage({
-          type: 'WALLET_UPDATED',
-          sellerId: targetSellerId,
-          userId: targetUserId,
-          newBalance: refundedBalance,
-          pendingBalance: currentPending,
-          wallet: updatedWalletItem,
-        });
-        bc.close();
-      }
-    } catch {}
+    broadcastWalletEvent({
+      type: 'WALLET_UPDATED',
+      sellerId: targetSellerId,
+      userId: targetUserId,
+      newBalance: refundedBalance,
+      pendingBalance: currentPending,
+      wallet: updatedWalletItem,
+    });
+    broadcastWalletEvent({
+      type: 'WITHDRAWAL_UPDATED',
+      withdrawal: updatedWithdrawal,
+    });
   };
 
   const deleteWithdrawalRequest = (withdrawalId: string) => {
@@ -6016,14 +6007,16 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setWithdrawals((prev) => {
           const prevMap = new Map<string, WithdrawalRequest>(prev.map((w) => [w.id, w]));
           live.forEach((lw: any) => {
-            if (lw && lw.id) {
+            if (lw && lw.id && !isWithdrawalDeleted(lw.id)) {
               const existing = prevMap.get(lw.id);
               prevMap.set(lw.id, existing ? { ...existing, ...lw } : (lw as WithdrawalRequest));
             }
           });
-          const merged = Array.from(prevMap.values()).filter(
-            (w) => !DUMMY_SELLER_IDS.has(w.sellerId) && !w.sellerId?.includes('@seller.com')
-          );
+          const merged = Array.from(prevMap.values())
+            .filter((w) => w && w.id && !isWithdrawalDeleted(w.id))
+            .sort(
+              (a, b) => new Date(b.requestedAt || (b as any).createdAt || 0).getTime() - new Date(a.requestedAt || (a as any).createdAt || 0).getTime()
+            );
           try {
             localStorage.setItem('nexus_withdrawals', JSON.stringify(merged));
           } catch {}
@@ -6267,31 +6260,70 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const senderName = senderOverride?.senderName || currentUser.name;
     const senderRole = senderOverride?.senderRole || currentUser.role;
 
+    const existingConv = conversations.find((c) => c.id === conversationId);
+    const isSeller = senderRole === 'SELLER';
+    let receiverId = isSeller
+      ? (existingConv?.participantTwoId || 'user_admin')
+      : (senderOverride?.sellerId || existingConv?.participantOneId || conversationId.replace(/^conv_/, ''));
+
+    if (!isSeller && (receiverId === 'user_admin' || receiverId === 'admin')) {
+      const altCandidate = senderOverride?.sellerId || senderOverride?.candidateIds?.[0];
+      if (altCandidate && altCandidate !== 'user_admin' && altCandidate !== 'admin') {
+        receiverId = altCandidate.replace(/^conv_/, '');
+      }
+    }
+
+    // 1. Immediately restore this chat thread from deleted list & clear cleared times
+    const allCandidateIds = Array.from(
+      new Set([
+        conversationId,
+        conversationId.replace(/^conv_/, ''),
+        `conv_${conversationId.replace(/^conv_/, '')}`,
+        senderId,
+        senderId.replace(/^conv_/, ''),
+        `conv_${senderId.replace(/^conv_/, '')}`,
+        receiverId,
+        receiverId.replace(/^conv_/, ''),
+        `conv_${receiverId.replace(/^conv_/, '')}`,
+        ...(senderOverride?.candidateIds || []),
+        ...(senderOverride?.sellerId
+          ? [
+              senderOverride.sellerId,
+              senderOverride.sellerId.replace(/^conv_/, ''),
+              `conv_${senderOverride.sellerId.replace(/^conv_/, '')}`,
+            ]
+          : []),
+      ])
+    ).filter(Boolean);
+
     const newMsg: Message = {
       id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       conversationId,
       senderId,
+      receiverId,
       senderName,
       senderRole,
       text,
       imageUrl,
       timestamp: new Date().toISOString(),
       isRead: false,
-    };
+      candidateIds: allCandidateIds,
+    } as any;
 
-    setMessages((prev) => [...prev, newMsg]);
+    setMessages((prev) => {
+      const updated = [...prev, newMsg];
+      try {
+        localStorage.setItem('nexus_messages', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
 
-    // 1. Immediately restore this chat thread from deleted list
-    restoreChatThread(conversationId, senderOverride?.candidateIds);
+    restoreChatThread(conversationId, allCandidateIds);
+    clearConversationClearedTime(conversationId, allCandidateIds);
 
     // 2. Update or restore conversation snippet in local state
     setConversations((prev) => {
-      const candidateList = [
-        conversationId,
-        conversationId.replace(/^conv_/, ''),
-        `conv_${conversationId.replace(/^conv_/, '')}`,
-        ...(senderOverride?.candidateIds || []),
-      ];
+      const candidateList = allCandidateIds;
       const idx = prev.findIndex((c) => candidateList.includes(c.id));
       const isSenderAdmin = senderRole === 'ADMIN';
 
@@ -6341,45 +6373,23 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
 
     // 1. Sync to Firestore using sendChatMessage (writes to chats/{chatId}/messages subcollection)
-    const existingConv = conversations.find((c) => c.id === conversationId);
-    const isSeller = senderRole === 'SELLER';
-    let receiverId = isSeller
-      ? (existingConv?.participantTwoId || 'user_admin')
-      : (senderOverride?.sellerId || existingConv?.participantOneId || conversationId);
-
-    if (!isSeller && (receiverId === 'user_admin' || receiverId === 'admin')) {
-      const altCandidate = senderOverride?.sellerId || senderOverride?.candidateIds?.[0];
-      if (altCandidate && altCandidate !== 'user_admin') {
-        receiverId = altCandidate;
-      }
-    }
-
     sendChatMessage(
       senderId,
       receiverId,
       text,
-      isSeller ? 'seller' : 'admin',
+      isSeller ? 'SELLER' : 'ADMIN',
       {
         imageUrl,
         senderName,
         messageId: newMsg.id,
-        candidateIds: senderOverride?.candidateIds,
-        sellerId: senderOverride?.sellerId,
+        candidateIds: senderOverride?.candidateIds || allCandidateIds,
+        sellerId: senderOverride?.sellerId || (isSeller ? senderId : receiverId),
         conversationId,
       }
     ).catch((err) => console.warn('[Firestore] sendChatMessage error:', err));
 
-    // Also mirror to syncMessageToFirestore for backward compatibility
-    syncMessageToFirestore(newMsg, existingConv);
-
     // 2. Broadcast across local browser tabs
-    try {
-      if (typeof BroadcastChannel !== 'undefined') {
-        const bc = new BroadcastChannel('nexus_chat_channel');
-        bc.postMessage({ type: 'NEW_CHAT_MESSAGE', message: newMsg });
-        bc.close();
-      }
-    } catch {}
+    broadcastChatEvent({ type: 'NEW_CHAT_MESSAGE', message: newMsg });
 
     // 3. Audio Beep: If message is from a seller (or non-admin) to admin
     const isFromSeller = senderRole === 'SELLER' || senderRole !== 'ADMIN';
@@ -6450,8 +6460,26 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
     const cleanSellerId = sellerMatch?.id || sellerMatch?.userId || userId;
 
+    const candidateIds = Array.from(
+      new Set([
+        cleanSellerId,
+        `conv_${cleanSellerId}`,
+        userId,
+        `conv_${userId}`,
+        sellerMatch?.id,
+        sellerMatch?.userId,
+        sellerMatch?.email,
+      ].filter(Boolean) as string[])
+    );
+
+    // Immediately restore thread and clear cleared time so this conversation is 100% active and unblocked
+    restoreChatThread(cleanSellerId, candidateIds);
+    clearConversationClearedTime(cleanSellerId, candidateIds);
+
     const existing = conversations.find(
       (c) =>
+        candidateIds.includes(c.id) ||
+        candidateIds.includes(c.participantOneId) ||
         c.id === cleanSellerId ||
         c.id === `conv_${cleanSellerId}` ||
         (sellerMatch && (c.id === sellerMatch.id || c.id === `conv_${sellerMatch.id}` || c.id === sellerMatch.userId || c.id === `conv_${sellerMatch.userId}`)) ||
@@ -6483,25 +6511,20 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       unreadCountParticipantTwo: 0,
     };
 
-    // Schedule state update safely outside the React render cycle to avoid infinite re-render loops
-    setTimeout(() => {
-      setConversations((prev) => {
-        if (
-          prev.some(
-            (c) =>
-              c.id === newConvId ||
-              c.participantOneId === cleanSellerId ||
-              c.participantOneId === userId
-          )
-        ) {
-          return prev;
-        }
-        return [newConv, ...prev];
-      });
-      syncConversationToFirestore(newConv).catch((err) =>
-        console.warn('[Firestore] Sync conversation error:', err)
+    setConversations((prev) => {
+      const alreadyHas = prev.some(
+        (c) =>
+          candidateIds.includes(c.id) ||
+          candidateIds.includes(c.participantOneId) ||
+          c.id === newConvId
       );
-    }, 0);
+      if (alreadyHas) return prev;
+      return [newConv, ...prev];
+    });
+
+    syncConversationToFirestore(newConv).catch((err) =>
+      console.warn('[Firestore] Sync conversation error:', err)
+    );
 
     return newConv;
   };
@@ -6577,6 +6600,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const deleteSingleMessage = (messageId: string, convId?: string, extraCandidateIds?: string[]) => {
+    if (!messageId) return;
+
+    // Immediately record deletion in memory set and localStorage
+    recordDeletedChatMessageId(messageId);
+
     let targetConvId = convId || '';
     const extraIds = new Set<string>(extraCandidateIds || []);
 
@@ -6589,6 +6617,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         if ((targetMsg as any).receiverId) extraIds.add((targetMsg as any).receiverId);
       }
       const updated = prev.filter((m) => m.id !== messageId);
+      try {
+        localStorage.setItem('nexus_messages', JSON.stringify(updated));
+      } catch {}
 
       const allIds = Array.from(new Set([targetConvId, ...Array.from(extraIds)])).filter(Boolean);
       allIds.forEach((cid) => {
@@ -6618,28 +6649,26 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     );
 
     // Broadcast deletion across local tabs
-    try {
-      if (typeof BroadcastChannel !== 'undefined') {
-        const bc = new BroadcastChannel('nexus_chat_channel');
-        bc.postMessage({
-          type: 'MESSAGE_DELETED',
-          messageId,
-          conversationId: targetConvId,
-          candidateIds: candidateList,
-        });
-        bc.close();
-      }
-    } catch {}
+    broadcastChatEvent({
+      type: 'MESSAGE_DELETED',
+      messageId,
+      conversationId: targetConvId,
+      candidateIds: candidateList,
+    });
   };
 
   const deleteEntireConversation = (conversationId: string, extraCandidateIds?: string[]) => {
-    const rawIds = [conversationId, ...(extraCandidateIds || [])].map((id) => (id || '').trim()).filter(Boolean);
+    const rawIds = [conversationId, ...(extraCandidateIds || [])]
+      .map((id) => (id || '').trim())
+      .filter((id) => Boolean(id) && id !== 'user_admin' && id !== 'admin');
     const candidateSet = new Set<string>();
     rawIds.forEach((id) => {
       const clean = id.startsWith('conv_') ? id.replace(/^conv_/, '') : id;
-      candidateSet.add(id);
-      candidateSet.add(clean);
-      candidateSet.add(`conv_${clean}`);
+      if (clean && clean !== 'user_admin' && clean !== 'admin') {
+        candidateSet.add(id);
+        candidateSet.add(clean);
+        candidateSet.add(`conv_${clean}`);
+      }
     });
     const candidateList = Array.from(candidateSet);
 
@@ -6647,7 +6676,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     recordChatThreadDeleted(conversationId, candidateList);
     recordConversationCleared(conversationId, candidateList);
 
-    // 2. Remove all messages for this thread
+    // 2. Remove only messages for this specific seller thread
     setMessages((prev) => {
       const updated = prev.filter((m) => {
         if (candidateSet.has(m.conversationId)) return false;
@@ -6661,10 +6690,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return updated;
     });
 
-    // 3. Remove conversation from conversations list
+    // 3. Remove only this specific seller conversation from conversations list
     setConversations((prev) => {
       const updated = prev.filter(
-        (c) => !candidateSet.has(c.id) && !candidateSet.has(c.participantOneId) && !candidateSet.has(c.participantTwoId)
+        (c) => !candidateSet.has(c.id) && !candidateSet.has(c.participantOneId)
       );
       try {
         localStorage.setItem('nexus_conversations', JSON.stringify(updated));
@@ -6707,28 +6736,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     validMessages: Message[],
     candidateIds?: string[]
   ) => {
-    if (!conversationId) return;
+    if (!conversationId || !validMessages || validMessages.length === 0) return;
 
-    // Case 1: Deletion or reset notification across tabs/listeners
-    if (!validMessages || validMessages.length === 0) {
-      if (candidateIds && candidateIds.length > 0) {
-        const delSet = new Set(candidateIds);
-        setMessages((prev) => {
-          const filtered = prev.filter((m) => {
-            if (delSet.has(m.id)) return false;
-            if (delSet.has(m.conversationId)) return false;
-            return true;
-          });
-          try {
-            localStorage.setItem('nexus_messages', JSON.stringify(filtered));
-          } catch {}
-          return filtered;
-        });
-      }
-      return;
-    }
-
-    // Case 2: Synchronizing live Firestore messages
     const candidateSet = new Set<string>([
       conversationId,
       conversationId.replace(/^conv_/, ''),
@@ -6736,17 +6745,17 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       ...(candidateIds || []),
     ]);
 
-    const clearedTime = getConversationClearedTime(conversationId);
-
     const filteredIncoming = validMessages.filter((m) => {
       if (!m || !m.id) return false;
       if (isChatMessageDeleted(m.id)) return false;
-      const msgTime = new Date(m.timestamp).getTime();
-      if (clearedTime > 0 && msgTime <= clearedTime) return false;
       return true;
     });
 
     if (filteredIncoming.length === 0) return;
+
+    // Automatically restore thread and reset cleared time if fresh incoming messages exist
+    restoreChatThread(conversationId, Array.from(candidateSet));
+    clearConversationClearedTime(conversationId, Array.from(candidateSet));
 
     // Check if chat thread was deleted and whether any incoming message has a timestamp after deletion
     const latestIncoming = filteredIncoming.reduce((latest, current) => {
@@ -6787,15 +6796,27 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
 
     setMessages((prev) => {
+      let hasChanges = false;
       const map = new Map<string, Message>();
       prev.forEach((m) => {
         if (!isChatMessageDeleted(m.id)) {
           map.set(m.id, m);
+        } else {
+          hasChanges = true;
         }
       });
       filteredIncoming.forEach((m) => {
-        map.set(m.id, m);
+        if (!isChatMessageDeleted(m.id)) {
+          const existing = map.get(m.id);
+          if (!existing || existing.text !== m.text || existing.timestamp !== m.timestamp || existing.isRead !== m.isRead) {
+            map.set(m.id, m);
+            hasChanges = true;
+          }
+        }
       });
+      if (!hasChanges && map.size === prev.length) {
+        return prev;
+      }
       const merged = Array.from(map.values()).sort(
         (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
       );

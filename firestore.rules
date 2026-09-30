@@ -44,17 +44,27 @@ service cloud.firestore {
 
     // 7. Support & Customer Chat Messages
     match /chat_messages/{messageId} {
-      allow read, write: if isValidId(messageId);
+      allow read, write: if true;
+    }
+
+    // 7b. Globally Tracked Deleted Chat Messages (Instant cross-device real-time chat deletion sync)
+    match /deleted_messages/{messageId} {
+      allow read, write: if true;
+    }
+
+    // 7c. Globally Tracked Deleted Chat Threads
+    match /deleted_chat_threads/{threadId} {
+      allow read, write: if true;
     }
 
     // 8. Support Conversations Threads & Chats
     match /conversations/{convId} {
-      allow read, write: if isValidId(convId);
+      allow read, write: if true;
     }
 
     // 8b. Real-time Seller-Admin Chats & Messages Subcollection
     match /chats/{chatId} {
-      allow read, write: if isValidId(chatId);
+      allow read, write: if true;
       match /messages/{messageId} {
         allow read, write: if true;
       }

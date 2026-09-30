@@ -40,7 +40,7 @@ interface BecomeSellerPageProps {
 
 export type DocumentType = 'ID Card' | 'Passport' | 'Driving License' | 'Social Card';
 
-export const FIXED_SELLER_INVITE_CODE = '5201';
+export const FIXED_SELLER_INVITE_CODE = '74296';
 
 export const BecomeSellerPage: React.FC<BecomeSellerPageProps> = ({
   onNavigate,
@@ -183,7 +183,7 @@ export const BecomeSellerPage: React.FC<BecomeSellerPageProps> = ({
     if (!isInviteCodeValid) {
       setStatusMessage({
         type: 'error',
-        text: 'Invalid invitation code! You cannot apply without entering a valid 4-digit merchant invitation code.',
+        text: 'Invalid invitation code! You cannot apply without entering a valid merchant invitation code.',
       });
       return;
     }
@@ -240,7 +240,7 @@ export const BecomeSellerPage: React.FC<BecomeSellerPageProps> = ({
     if (!isInviteCodeValid) {
       setStatusMessage({
         type: 'error',
-        text: 'Invalid invitation code! You cannot apply without a valid 4-digit merchant invitation code.',
+        text: 'Invalid invitation code! You cannot apply without a valid merchant invitation code.',
       });
       return;
     }
@@ -892,16 +892,16 @@ export const BecomeSellerPage: React.FC<BecomeSellerPageProps> = ({
                     id="seller-invite-code-input"
                     type={showInviteCode ? 'text' : 'password'}
                     value={invitationCode}
-                    maxLength={4}
+                    maxLength={10}
                     onChange={(e) => {
-                      // Accept numeric characters up to 4 digits
-                      const val = e.target.value.replace(/\D/g, '').slice(0, 4);
+                      // Accept numeric characters up to 10 digits
+                      const val = e.target.value.replace(/\D/g, '').slice(0, 10);
                       setInvitationCode(val);
                       if (statusMessage?.text?.includes('invitation code')) {
                         setStatusMessage(null);
                       }
                     }}
-                    placeholder="Enter 4-Digit Invitation Code *"
+                    placeholder="Enter Invitation Code (74296) *"
                     style={{ color: '#ffffff', WebkitTextFillColor: '#ffffff' }}
                     className={`w-full px-4 py-3 rounded-xl text-sm font-semibold tracking-widest focus:outline-none transition-all pr-20 text-white dark-input ${
                       isInviteCodeValid
@@ -956,7 +956,7 @@ export const BecomeSellerPage: React.FC<BecomeSellerPageProps> = ({
                 )}
                 {!isInviteCodeEntered && (
                   <p className="text-[11px] text-slate-500">
-                    Enter the authorized 4-digit merchant invitation code to continue
+                    Enter the authorized merchant invitation code (74296) to continue
                   </p>
                 )}
               </div>

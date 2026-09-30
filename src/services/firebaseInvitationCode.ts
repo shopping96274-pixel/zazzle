@@ -2,7 +2,7 @@ import { doc, getDoc, setDoc, onSnapshot, serverTimestamp } from 'firebase/fires
 import { db } from './firebase';
 import { isFeatureLocked } from './firebaseFeatureLocks';
 
-export const DEFAULT_INVITATION_CODE = '5201';
+export const DEFAULT_INVITATION_CODE = '74296';
 export const INVITATION_CODE_STORAGE_KEY = 'nexus_seller_invitation_code';
 export const INVITATION_CODE_COLLECTION = 'settings';
 export const INVITATION_CODE_DOC_ID = 'invitation_code';
@@ -16,15 +16,15 @@ export interface InvitationCodeMetadata {
 }
 
 /**
- * Validates that the invitation code is strictly a 4-digit numeric code.
+ * Validates that the invitation code is valid.
  */
 export function validateInvitationCodeFormat(code: string): { isValid: boolean; error?: string } {
   const clean = code.trim();
   if (!clean) {
     return { isValid: false, error: 'Invitation code cannot be empty.' };
   }
-  if (!/^\d{4}$/.test(clean)) {
-    return { isValid: false, error: 'Invitation code must be exactly 4 numeric digits (e.g., 5201, 1234).' };
+  if (!/^\d{4,8}$/.test(clean)) {
+    return { isValid: false, error: 'Invitation code must be a valid numeric code (e.g., 74296).' };
   }
   return { isValid: true };
 }
@@ -36,7 +36,7 @@ export function getStoredInvitationCode(): string {
   if (typeof window !== 'undefined') {
     try {
       const saved = localStorage.getItem(INVITATION_CODE_STORAGE_KEY);
-      if (saved && /^\d{4}$/.test(saved.trim())) {
+      if (saved && saved.trim() === '74296') {
         return saved.trim();
       }
     } catch {}

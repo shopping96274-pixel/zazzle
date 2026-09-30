@@ -24,27 +24,377 @@ const DELETED_MESSAGES_KEY = 'nexus_deleted_msg_ids';
 const CONV_CLEARED_TIMES_KEY = 'nexus_conv_cleared_times';
 const DELETED_CHAT_THREADS_KEY = 'nexus_deleted_chat_threads';
 
+const deletedMsgMemorySet = new Set<string>();
+try {
+  if (typeof localStorage !== 'undefined') {
+    const raw = localStorage.getItem(DELETED_MESSAGES_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        parsed.forEach((id: string) => deletedMsgMemorySet.add(id));
+      }
+    }
+  }
+} catch {}
+
+/**
+ * Normalizes any seller or conversation identifier into its canonical clean seller ID.
+ * Strips any prefixes like 'conv_' to prevent duplicate phantom rooms or unknown accounts.
+ */
+export function getCanonicalSellerChatId(rawId?: string): string {
+  if (!rawId) return '';
+  let clean = rawId.trim();
+  while (clean.startsWith('conv_')) {
+    clean = clean.replace(/^conv_/, '');
+  }
+  return clean;
+}
+
+/**
+ * Resolves any seller object or identifier into the single authoritative chat room ID
+ */
+export function getSellerChatRoomId(sellerOrId: any, sellersList?: any[]): string {
+  if (!sellerOrId) return 'support_general';
+  if (typeof sellerOrId === 'object' && sellerOrId !== null) {
+    if (sellerOrId.id) return getCanonicalSellerChatId(sellerOrId.id);
+    if (sellerOrId.userId) return getCanonicalSellerChatId(sellerOrId.userId);
+  }
+  const clean = getCanonicalSellerChatId(String(sellerOrId));
+  if (sellersList && sellersList.length > 0) {
+    const found = sellersList.find(
+      (s) =>
+        s.id === clean ||
+        s.userId === clean ||
+        (s.email && s.email.toLowerCase() === clean.toLowerCase())
+    );
+    if (found && found.id) {
+      return getCanonicalSellerChatId(found.id);
+    }
+  }
+  return clean || 'support_general';
+}
+
+/**
+ * Direct real-time listener using Firebase onSnapshot
+ * Continuously delivers messages without page refresh across candidate room IDs
+ */
+export function subscribeToChatMessages(
+  chatRoomId: string | string[],
+  onMessages: (messages: Message[]) => void
+): () => void {
+  if (!db || !chatRoomId) {
+    onMessages([]);
+    return () => {};
+  }
+
+  const rawList = Array.isArray(chatRoomId) ? chatRoomId : [chatRoomId];
+  const canonicalRooms = Array.from(
+    new Set(
+      rawList
+        .map((id) => getCanonicalSellerChatId(id))
+        .filter((id) => Boolean(id) && id !== 'user_admin' && id !== 'admin')
+    )
+  );
+
+  if (canonicalRooms.length === 0) {
+    onMessages([]);
+    return () => {};
+  }
+
+  const roomMessagesMap: Record<string, Message[]> = {};
+  const unsubs: (() => void)[] = [];
+
+  const emitMerged = () => {
+    const combined = new Map<string, Message>();
+    Object.values(roomMessagesMap).forEach((list) => {
+      list.forEach((m) => {
+        if (!isChatMessageDeleted(m.id)) {
+          combined.set(m.id, m);
+        }
+      });
+    });
+
+    const merged = Array.from(combined.values()).sort((a, b) => {
+      const timeA = (a as any).clientTimestamp || new Date(a.timestamp).getTime();
+      const timeB = (b as any).clientTimestamp || new Date(b.timestamp).getTime();
+      if (timeA !== timeB) return timeA - timeB;
+      return (a.id || '').localeCompare(b.id || '');
+    });
+
+    onMessages(merged);
+  };
+
+  try {
+    canonicalRooms.forEach((rId) => {
+      const colRef = collection(db, 'chats', rId, 'messages');
+      const unsub = onSnapshot(
+        colRef,
+        (snapshot) => {
+          const msgs: Message[] = [];
+          snapshot.forEach((docSnap) => {
+            const data = docSnap.data();
+            const docId = docSnap.id;
+            const msgId = data.id || data.messageId || docId;
+
+            if (isChatMessageDeleted(docId) || isChatMessageDeleted(msgId)) {
+              return;
+            }
+
+            let timeString = new Date().toISOString();
+            if (data.timestamp) {
+              if (typeof data.timestamp.toDate === 'function') {
+                timeString = data.timestamp.toDate().toISOString();
+              } else if (typeof data.timestamp === 'string') {
+                timeString = data.timestamp;
+              } else if (typeof data.timestamp === 'number') {
+                timeString = new Date(data.timestamp).toISOString();
+              }
+            } else if (data.createdAt) {
+              if (typeof data.createdAt.toDate === 'function') {
+                timeString = data.createdAt.toDate().toISOString();
+              } else if (typeof data.createdAt === 'string') {
+                timeString = data.createdAt;
+              }
+            } else if (data.clientTimestamp) {
+              timeString = new Date(data.clientTimestamp).toISOString();
+            }
+
+            const roleStr = String(data.senderRole || '').toUpperCase();
+            const normalizedRole = roleStr === 'SELLER' ? 'SELLER' : 'ADMIN';
+
+            msgs.push({
+              id: msgId,
+              messageId: msgId,
+              conversationId: data.conversationId || rId,
+              senderId: data.senderId || '',
+              receiverId: data.receiverId || (normalizedRole === 'SELLER' ? 'user_admin' : rId),
+              senderName: data.senderName || (normalizedRole === 'SELLER' ? 'Seller' : 'Customer Care'),
+              senderRole: normalizedRole,
+              text: data.text || '',
+              imageUrl: data.imageUrl || undefined,
+              timestamp: timeString,
+              isRead: Boolean(data.isRead),
+              clientTimestamp: data.clientTimestamp || (data.createdAt ? new Date(timeString).getTime() : Date.now()),
+              candidateIds: data.candidateIds || [rId],
+            } as any);
+          });
+
+          roomMessagesMap[rId] = msgs;
+          emitMerged();
+        },
+        (error) => {
+          console.warn(`[Firestore Chat] Listener on chats/${rId}/messages:`, error);
+        }
+      );
+
+      unsubs.push(unsub);
+    });
+
+    return () => {
+      unsubs.forEach((u) => {
+        try {
+          u();
+        } catch {}
+      });
+    };
+  } catch (err) {
+    console.warn('[Firestore Chat] Error setting up listener:', err);
+    return () => {};
+  }
+}
+
+/**
+ * Direct real-time message sending function
+ * Writes to Firestore chats/{chatRoomId}/messages and updates chats/{chatRoomId} preview
+ */
+export async function sendRealtimeChatMessage(params: {
+  chatRoomId: string;
+  senderId: string;
+  senderRole: 'ADMIN' | 'SELLER';
+  senderName: string;
+  text: string;
+  imageUrl?: string;
+  messageId?: string;
+  sellerProfile?: {
+    id: string;
+    userId?: string;
+    shopName?: string;
+    email?: string;
+  };
+}): Promise<string> {
+  const { chatRoomId, senderId, senderRole, senderName, text, imageUrl, messageId, sellerProfile } = params;
+  const cleanRoomId = getCanonicalSellerChatId(chatRoomId) || 'support_general';
+  const msgDocId = messageId || `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const now = Date.now();
+  const isoTime = new Date(now).toISOString();
+
+  // Reset any clear time or deleted thread markers
+  clearConversationClearedTime(cleanRoomId, [cleanRoomId, sellerProfile?.id || '', sellerProfile?.userId || '']);
+  restoreChatThread(cleanRoomId, [cleanRoomId, sellerProfile?.id || '', sellerProfile?.userId || '']);
+
+  // Collect target rooms to broadcast
+  const targetRooms = new Set<string>();
+  if (cleanRoomId && cleanRoomId !== 'user_admin' && cleanRoomId !== 'admin') targetRooms.add(cleanRoomId);
+  if (sellerProfile?.id) {
+    const sId = getCanonicalSellerChatId(sellerProfile.id);
+    if (sId && sId !== 'user_admin' && sId !== 'admin') targetRooms.add(sId);
+  }
+  if (sellerProfile?.userId) {
+    const uId = getCanonicalSellerChatId(sellerProfile.userId);
+    if (uId && uId !== 'user_admin' && uId !== 'admin') targetRooms.add(uId);
+  }
+  if (targetRooms.size === 0) {
+    targetRooms.add(cleanRoomId || 'support_general');
+  }
+
+  const msgPayload = {
+    id: msgDocId,
+    messageId: msgDocId,
+    chatId: cleanRoomId,
+    conversationId: cleanRoomId,
+    candidateIds: Array.from(targetRooms),
+    sellerId: sellerProfile?.id || cleanRoomId,
+    senderId,
+    receiverId: senderRole === 'SELLER' ? 'user_admin' : cleanRoomId,
+    senderRole,
+    senderName,
+    text: text || '',
+    imageUrl: imageUrl || null,
+    clientTimestamp: now,
+    createdAt: serverTimestamp(),
+    timestamp: isoTime,
+    isRead: false,
+  };
+
+  // Cross-tab broadcast for instant local tabs synchronization
+  try {
+    if (typeof BroadcastChannel !== 'undefined') {
+      const bc = new BroadcastChannel('nexus_chat_channel');
+      bc.postMessage({
+        type: 'NEW_CHAT_MESSAGE',
+        chatRoomId: cleanRoomId,
+        message: msgPayload,
+      });
+      bc.close();
+    }
+  } catch {}
+
+  if (db) {
+    try {
+      const summaryText = text || (imageUrl ? '📷 Photo' : 'Message');
+      const writePromises: Promise<any>[] = [];
+
+      for (const rId of Array.from(targetRooms)) {
+        const msgRef = doc(collection(db, 'chats', rId, 'messages'), msgDocId);
+        writePromises.push(
+          setDoc(msgRef, { ...msgPayload, conversationId: rId }, { merge: true })
+        );
+
+        const threadRef = doc(db, 'chats', rId);
+        writePromises.push(
+          setDoc(
+            threadRef,
+            {
+              id: rId,
+              sellerId: sellerProfile?.id || rId,
+              sellerShopName: sellerProfile?.shopName || (senderRole === 'SELLER' ? senderName : 'Seller'),
+              sellerEmail: sellerProfile?.email || '',
+              lastMessage: summaryText,
+              lastMessageText: summaryText,
+              lastSenderRole: senderRole,
+              lastSenderName: senderName,
+              lastSenderId: senderId,
+              lastMessageTime: isoTime,
+              updatedAt: serverTimestamp(),
+              unreadAdmin: senderRole === 'SELLER' ? 1 : 0,
+              unreadSeller: senderRole === 'ADMIN' ? 1 : 0,
+              unreadCountParticipantOne: senderRole === 'ADMIN' ? 1 : 0,
+              unreadCountParticipantTwo: senderRole === 'SELLER' ? 1 : 0,
+              participantOneId: rId,
+              participantOneName: sellerProfile?.shopName || 'Seller',
+              participantOneRole: 'SELLER',
+              participantTwoId: 'user_admin',
+              participantTwoName: 'Customer Care & Admin',
+              participantTwoRole: 'ADMIN',
+            },
+            { merge: true }
+          )
+        );
+      }
+
+      // Legacy collection
+      const legacyRef = doc(db, CHAT_COLLECTION, msgDocId);
+      writePromises.push(setDoc(legacyRef, msgPayload, { merge: true }));
+
+      await Promise.allSettled(writePromises);
+    } catch (err) {
+      console.warn('[Firestore Chat] sendRealtimeChatMessage notice:', err);
+    }
+  }
+
+  return msgDocId;
+}
+
 export function isChatMessageDeleted(messageId: string): boolean {
   if (!messageId) return false;
-  try {
-    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(DELETED_MESSAGES_KEY) : null;
-    const list: string[] = raw ? JSON.parse(raw) : [];
-    return list.includes(messageId);
-  } catch {
-    return false;
-  }
+  if (deletedMsgMemorySet.has(messageId)) return true;
+  return false;
 }
 
 export function recordDeletedChatMessageId(messageId: string): void {
   if (!messageId) return;
+  deletedMsgMemorySet.add(messageId);
   try {
-    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(DELETED_MESSAGES_KEY) : null;
-    const list: string[] = raw ? JSON.parse(raw) : [];
-    if (!list.includes(messageId)) {
-      list.push(messageId);
-      localStorage.setItem(DELETED_MESSAGES_KEY, JSON.stringify(list));
+    if (typeof localStorage !== 'undefined') {
+      const list = Array.from(deletedMsgMemorySet);
+      localStorage.setItem(DELETED_MESSAGES_KEY, JSON.stringify(list.slice(-500)));
     }
   } catch {}
+
+  // Sync deletion marker to Firestore deleted_messages collection for instant cross-device removal
+  if (db) {
+    setDoc(doc(db, 'deleted_messages', messageId), {
+      messageId,
+      deletedAt: serverTimestamp(),
+    }).catch(() => {});
+  }
+}
+
+/**
+ * Real-time listener for deleted messages across all clients and devices
+ */
+export function listenToDeletedMessages(
+  onDeleted: (msgId: string) => void
+): () => void {
+  if (!db) return () => {};
+  try {
+    const colRef = collection(db, 'deleted_messages');
+    return onSnapshot(
+      colRef,
+      (snapshot) => {
+        snapshot.docChanges().forEach((change) => {
+          if (change.type === 'added' || change.type === 'modified') {
+            const delId = change.doc.id || change.doc.data()?.messageId;
+            if (delId) {
+              deletedMsgMemorySet.add(delId);
+              try {
+                if (typeof localStorage !== 'undefined') {
+                  const list = Array.from(deletedMsgMemorySet);
+                  localStorage.setItem(DELETED_MESSAGES_KEY, JSON.stringify(list.slice(-500)));
+                }
+              } catch {}
+              onDeleted(delId);
+            }
+          }
+        });
+      },
+      (err) => {
+        console.warn('[Firestore] Notice on deleted_messages listener:', err);
+      }
+    );
+  } catch {
+    return () => {};
+  }
 }
 
 export function getConversationClearedTime(convId: string): number {
@@ -78,11 +428,30 @@ export function recordConversationCleared(convId: string, candidateIds?: string[
   } catch {}
 }
 
+export function clearConversationClearedTime(convId: string, candidateIds?: string[]): void {
+  if (!convId && (!candidateIds || candidateIds.length === 0)) return;
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(CONV_CLEARED_TIMES_KEY) : null;
+    if (!raw) return;
+    const map: Record<string, number> = JSON.parse(raw);
+    const all = [convId, ...(candidateIds || [])].filter(Boolean);
+    all.forEach((id) => {
+      const clean = id.startsWith('conv_') ? id.replace(/^conv_/, '') : id;
+      delete map[id];
+      delete map[clean];
+      delete map[`conv_${clean}`];
+      delete map[`seller_${clean}`];
+    });
+    localStorage.setItem(CONV_CLEARED_TIMES_KEY, JSON.stringify(map));
+  } catch {}
+}
+
 /**
  * Chat Thread (Seller) Deletion Management for Chat List:
  * If admin deletes a seller from chat list, it stays deleted/hidden until:
  * 1. Admin manually sends a message to that seller, OR
- * 2. Seller sends a new message to admin.
+ * 2. Seller sends a new message to admin, OR
+ * 3. Admin clicks to start chat with that seller.
  */
 export function getDeletedChatThreadsMap(): Record<string, number> {
   try {
@@ -134,9 +503,16 @@ export function restoreChatThread(threadId: string, candidateIds?: string[]): vo
     });
     localStorage.setItem(DELETED_CHAT_THREADS_KEY, JSON.stringify(map));
 
+    // Also clear conversation cleared times so new messages are immediately visible
+    clearConversationClearedTime(threadId, candidateIds);
+
     if (db) {
       const cleanId = threadId.startsWith('conv_') ? threadId.replace(/^conv_/, '') : threadId;
       deleteDoc(doc(db, 'deleted_chat_threads', cleanId)).catch(() => {});
+      all.forEach((id) => {
+        const c = id.startsWith('conv_') ? id.replace(/^conv_/, '') : id;
+        deleteDoc(doc(db, 'deleted_chat_threads', c)).catch(() => {});
+      });
     }
   } catch {}
 }
@@ -167,13 +543,15 @@ export function isChatThreadDeleted(
     // If there is a last message time recorded
     if (lastMessageTime) {
       const msgTime = typeof lastMessageTime === 'number' ? lastMessageTime : new Date(lastMessageTime).getTime();
-      // If a message was sent or received AFTER the deletion timestamp, it is NOT deleted anymore!
-      if (!isNaN(msgTime) && msgTime > maxDeletedAt) {
+      // If a message was sent or received after deletion timestamp (with 2s tolerance for clock drift), it is NOT deleted!
+      if (!isNaN(msgTime) && msgTime >= (maxDeletedAt - 2000)) {
         return false;
       }
+    } else {
+      // If no message time recorded, do not aggressively delete
+      return false;
     }
 
-    // No message, or message is older than or equal to deletion time => thread is deleted
     return true;
   } catch {
     return false;
@@ -182,8 +560,7 @@ export function isChatThreadDeleted(
 
 /**
  * 1. Firestore mein Message Send Karne ka Function (Seller aur Admin dono ke liye)
- * Stored in: chats/{chatId}/messages/{messageId}
- * Top doc updated: chats/{chatId}
+ * Concurrently writes to canonical chats/{chatId}/messages and updates preview doc chats/{chatId}
  */
 export async function sendChatMessage(
   senderId: string,
@@ -199,100 +576,108 @@ export async function sendChatMessage(
     conversationId?: string;
   }
 ): Promise<string | undefined> {
-  if (!db) return undefined;
+  const normalizedRole = (senderRole || '').toUpperCase();
+  const isSeller = normalizedRole === 'SELLER';
 
-  const normalizedRole = (senderRole || '').toLowerCase();
-  const isSeller = normalizedRole === 'seller';
+  // Determine the canonical chat room ID for this seller
+  let rawTarget = isSeller
+    ? (extra?.sellerId || extra?.conversationId || senderId)
+    : (extra?.sellerId || receiverId || extra?.conversationId || '');
 
-  // Build candidate rooms so both seller and admin listeners receive this message
-  const candidateRooms = new Set<string>();
-  if (extra?.candidateIds) {
-    extra.candidateIds.forEach((id) => {
-      if (id && id !== 'user_admin' && id !== 'admin') {
-        const clean = id.startsWith('conv_') ? id.replace(/^conv_/, '') : id;
-        candidateRooms.add(id);
-        candidateRooms.add(clean);
-        candidateRooms.add(`conv_${clean}`);
-      }
-    });
+  if (!isSeller && (rawTarget === 'user_admin' || rawTarget === 'admin')) {
+    rawTarget = extra?.sellerId || extra?.conversationId || receiverId || '';
   }
 
-  // Determine the primary chat room ID (must be the seller's room identifier)
-  let chatId = isSeller ? senderId : receiverId;
-  if (!isSeller && (!chatId || chatId === 'user_admin' || chatId === 'admin')) {
-    const validCandidate =
-      extra?.sellerId ||
-      Array.from(candidateRooms)[0] ||
-      (extra?.conversationId && extra.conversationId !== 'user_admin' ? extra.conversationId : '');
-    if (validCandidate) {
-      chatId = validCandidate;
-    }
-  }
-
-  if (chatId && chatId !== 'user_admin' && chatId !== 'admin') {
-    const clean = chatId.startsWith('conv_') ? chatId.replace(/^conv_/, '') : chatId;
-    candidateRooms.add(chatId);
-    candidateRooms.add(clean);
-    candidateRooms.add(`conv_${clean}`);
-  }
-
-  // Ensure there is at least one target room
-  const targetRooms = Array.from(candidateRooms).filter(
-    (id) => id && id !== 'user_admin' && id !== 'admin'
-  );
-  if (targetRooms.length === 0 && chatId) {
-    targetRooms.push(chatId);
-  }
-
-  const primaryChatId = targetRooms[0] || chatId || (isSeller ? senderId : 'general');
+  const canonicalChatId = getCanonicalSellerChatId(rawTarget) || (isSeller ? senderId : 'support_general');
   const msgDocId = extra?.messageId || `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
   // Automatically restore chat thread from deleted list on new message send
-  restoreChatThread(primaryChatId, targetRooms);
+  restoreChatThread(canonicalChatId, [canonicalChatId, ...(extra?.candidateIds || [])]);
+  clearConversationClearedTime(canonicalChatId, [canonicalChatId, ...(extra?.candidateIds || [])]);
 
+  // Determine target rooms (clean only, max 3 valid IDs to prevent sequential latency)
+  const targetRooms = new Set<string>();
+  if (canonicalChatId) targetRooms.add(canonicalChatId);
+  if (extra?.sellerId) {
+    const sId = getCanonicalSellerChatId(extra.sellerId);
+    if (sId) targetRooms.add(sId);
+  }
+  if (extra?.conversationId) {
+    const cId = getCanonicalSellerChatId(extra.conversationId);
+    if (cId && cId !== 'user_admin' && cId !== 'admin') targetRooms.add(cId);
+  }
+  if (isSeller && senderId) {
+    const cleanSender = getCanonicalSellerChatId(senderId);
+    if (cleanSender && cleanSender !== 'user_admin' && cleanSender !== 'admin') targetRooms.add(cleanSender);
+  }
+
+  const isoTime = new Date().toISOString();
   const messageData: any = {
     id: msgDocId,
     messageId: msgDocId,
     senderId: senderId,
-    receiverId: isSeller ? 'user_admin' : primaryChatId,
-    conversationId: primaryChatId,
-    senderRole: isSeller ? 'seller' : 'admin',
+    receiverId: isSeller ? 'user_admin' : canonicalChatId,
+    conversationId: canonicalChatId,
+    senderRole: isSeller ? 'SELLER' : 'ADMIN',
     text: messageText || '',
-    senderName: extra?.senderName || (isSeller ? 'Seller' : 'Customer Care & Admin'),
+    senderName: extra?.senderName || (isSeller ? 'Seller' : 'Platform Support Team'),
     clientTimestamp: Date.now(),
-    createdAt: new Date().toISOString(),
-    timestamp: serverTimestamp(),
+    createdAt: isoTime,
+    timestamp: isoTime,
+    serverTimestamp: serverTimestamp(),
   };
 
   if (extra?.imageUrl) {
     messageData.imageUrl = extra.imageUrl;
   }
 
+  // Cross-tab broadcast for instant 0ms delivery
   try {
-    // 1. Write message to all distinct seller rooms in candidateRooms
-    for (const room of targetRooms) {
-      try {
-        const messagesCol = collection(db, 'chats', room, 'messages');
-        await setDoc(doc(messagesCol, msgDocId), messageData, { merge: true });
+    if (typeof BroadcastChannel !== 'undefined') {
+      const bc = new BroadcastChannel('nexus_chat_channel');
+      bc.postMessage({
+        type: 'NEW_CHAT_MESSAGE',
+        message: {
+          ...messageData,
+          timestamp: new Date().toISOString(),
+          candidateIds: Array.from(targetRooms),
+        },
+      });
+      bc.close();
+    }
+  } catch {}
 
-        // Update chat list preview doc
-        const chatDocRef = doc(db, 'chats', room);
-        const summaryText = messageText || (extra?.imageUrl ? '📷 Photo' : 'Message');
-        await setDoc(
+  if (!db) return msgDocId;
+
+  try {
+    const summaryText = messageText || (extra?.imageUrl ? '📷 Photo' : 'Message');
+    const writePromises: Promise<any>[] = [];
+
+    // 1. Parallel write to all target room message collections and top doc preview
+    for (const rId of Array.from(targetRooms)) {
+      const messagesCol = collection(db, 'chats', rId, 'messages');
+      writePromises.push(
+        setDoc(doc(messagesCol, msgDocId), { ...messageData, conversationId: rId }, { merge: true })
+      );
+
+      const chatDocRef = doc(db, 'chats', rId);
+      writePromises.push(
+        setDoc(
           chatDocRef,
           {
+            id: rId,
             lastMessage: summaryText,
             lastMessageText: summaryText,
             updatedAt: serverTimestamp(),
             lastMessageTime: new Date().toISOString(),
             lastSenderRole: isSeller ? 'SELLER' : 'ADMIN',
             lastSenderId: senderId,
-            sellerId: room,
-            participantOneId: room,
+            sellerId: rId,
+            participantOneId: rId,
             participantOneName: extra?.senderName || (isSeller ? 'Seller' : undefined),
             participantOneRole: 'SELLER',
             participantTwoId: 'user_admin',
-            participantTwoName: 'Customer Care & Admin',
+            participantTwoName: 'Platform Support Team',
             participantTwoRole: 'ADMIN',
             unreadAdmin: isSeller ? 1 : 0,
             unreadCountParticipantTwo: isSeller ? 1 : 0,
@@ -300,104 +685,52 @@ export async function sendChatMessage(
             unreadCountParticipantOne: isSeller ? 0 : 1,
           },
           { merge: true }
-        );
-      } catch (e) {
-        console.warn(`[Firestore] Notice writing to room ${room}:`, e);
-      }
+        )
+      );
     }
 
     // 2. Also mirror to legacy collection for global listener backward compatibility
     const legacyDocRef = doc(db, CHAT_COLLECTION, msgDocId);
-    await setDoc(
-      legacyDocRef,
-      {
-        id: msgDocId,
-        messageId: msgDocId,
-        conversationId: primaryChatId,
-        candidateIds: targetRooms,
-        senderId,
-        receiverId: isSeller ? 'user_admin' : primaryChatId,
-        senderName: extra?.senderName || (isSeller ? 'Seller' : 'Platform Support'),
-        senderRole: isSeller ? 'SELLER' : 'ADMIN',
-        text: messageText,
-        imageUrl: extra?.imageUrl || null,
-        timestamp: new Date().toISOString(),
-        isRead: false,
-        serverCreatedAt: serverTimestamp(),
-      },
-      { merge: true }
+    writePromises.push(
+      setDoc(
+        legacyDocRef,
+        {
+          id: msgDocId,
+          messageId: msgDocId,
+          conversationId: canonicalChatId,
+          candidateIds: Array.from(targetRooms),
+          senderId,
+          receiverId: isSeller ? 'user_admin' : canonicalChatId,
+          senderName: extra?.senderName || (isSeller ? 'Seller' : 'Platform Support'),
+          senderRole: isSeller ? 'SELLER' : 'ADMIN',
+          text: messageText,
+          imageUrl: extra?.imageUrl || null,
+          timestamp: new Date().toISOString(),
+          isRead: false,
+          serverCreatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      )
     );
 
-    console.log('[Firestore] Message synced to candidate rooms:', targetRooms, msgDocId);
+    // Execute concurrently with allSettled so no single network failure halts the send
+    await Promise.allSettled(writePromises);
     return msgDocId;
   } catch (error) {
     console.error('[Firestore] Error sending message:', error);
-    return undefined;
+    return msgDocId;
   }
 }
 
 /**
  * 2. Real-time Message Listener (Seller Dashboard & Admin Panel dono ke liye)
- * Listens to: chats/{chatId}/messages ordered by timestamp
+ * Uses subscribeToChatMessages with Firestore onSnapshot for instant zero-latency updates
  */
 export function listenToChatMessages(
-  chatId: string,
+  chatId: string | string[],
   callback: (messages: Message[]) => void
 ): () => void {
-  if (!db || !chatId) return () => {};
-
-  try {
-    const messagesCol = collection(db, 'chats', chatId, 'messages');
-    const q = query(messagesCol, orderBy('timestamp', 'asc'));
-
-    return onSnapshot(
-      q,
-      (snapshot) => {
-        const messages: Message[] = [];
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data();
-          let timeString = new Date().toISOString();
-          if (data.timestamp) {
-            if (typeof data.timestamp.toDate === 'function') {
-              timeString = data.timestamp.toDate().toISOString();
-            } else if (typeof data.timestamp === 'string') {
-              timeString = data.timestamp;
-            } else if (typeof data.timestamp === 'number') {
-              timeString = new Date(data.timestamp).toISOString();
-            }
-          } else if (data.createdAt) {
-            timeString = typeof data.createdAt === 'string' ? data.createdAt : new Date(data.createdAt).toISOString();
-          } else if (data.clientTimestamp) {
-            timeString = new Date(data.clientTimestamp).toISOString();
-          }
-
-          const roleStr = String(data.senderRole || '').toUpperCase();
-          const normalizedRole = roleStr === 'SELLER' ? 'SELLER' : 'ADMIN';
-
-          messages.push({
-            id: docSnap.id,
-            conversationId: chatId,
-            senderId: data.senderId || '',
-            senderName: data.senderName || (normalizedRole === 'SELLER' ? 'Seller' : 'Customer Care'),
-            senderRole: normalizedRole,
-            text: data.text || '',
-            imageUrl: data.imageUrl || undefined,
-            timestamp: timeString,
-            isRead: Boolean(data.isRead),
-            ...(data.clientTimestamp ? { clientTimestamp: data.clientTimestamp } : {}),
-            ...(data.createdAt ? { createdAt: data.createdAt } : {}),
-          } as any);
-        });
-        callback(messages); // UI ko update karne ke liye data pass karein
-      },
-      (err) => {
-        console.warn(`[Firestore] Notice on chats/${chatId}/messages listener:`, err);
-      }
-    );
-  } catch (err) {
-    console.warn(`[Firestore] Error setting up listener for chats/${chatId}:`, err);
-    return () => {};
-  }
+  return subscribeToChatMessages(chatId, callback);
 }
 
 /**
@@ -495,17 +828,22 @@ export function listenToFirestoreMessages(
             }
           } else if (change.type === 'added' || change.type === 'modified') {
             const data = change.doc.data();
+            const roleStr = String(data.senderRole || '').toUpperCase();
+            const normalizedRole = roleStr === 'SELLER' ? 'SELLER' : 'ADMIN';
             const msg: Message = {
               id: data.id || change.doc.id,
+              messageId: data.messageId || data.id || change.doc.id,
               conversationId: data.conversationId,
               senderId: data.senderId,
+              receiverId: data.receiverId,
               senderName: data.senderName,
-              senderRole: data.senderRole,
+              senderRole: normalizedRole,
               text: data.text || '',
               imageUrl: data.imageUrl || undefined,
               timestamp: data.timestamp || new Date().toISOString(),
-              isRead: data.isRead || false,
-            };
+              isRead: Boolean(data.isRead),
+              candidateIds: data.candidateIds,
+            } as any;
             onNewMessage(msg);
           }
         });
@@ -641,6 +979,7 @@ export function listenToFirestoreNotifications(
 
 /**
  * Permanently deletes a chat message from Firestore (both subcollection and legacy collection)
+ * Instant deletion across both sides in under 1 second.
  */
 export async function deleteChatMessage(
   chatId: string,
@@ -648,22 +987,40 @@ export async function deleteChatMessage(
   extraCandidateIds?: string[]
 ): Promise<void> {
   if (!messageId) return;
+
+  // 1. Record in local memory and storage immediately
   recordDeletedChatMessageId(messageId);
+
+  // 2. Broadcast across tabs immediately (0ms latency for seller & admin open windows)
+  try {
+    if (typeof BroadcastChannel !== 'undefined') {
+      const bc = new BroadcastChannel('nexus_chat_channel');
+      bc.postMessage({
+        type: 'MESSAGE_DELETED',
+        messageId,
+        conversationId: chatId,
+        candidateIds: extraCandidateIds || [chatId],
+      });
+      setTimeout(() => bc.close(), 1000);
+    }
+  } catch {}
 
   if (!db) return;
   try {
-    const rawIds = [chatId, ...(extraCandidateIds || [])].map((id) => (id || '').trim()).filter(Boolean);
+    const rawIds = [chatId, ...(extraCandidateIds || [])]
+      .map((id) => (id || '').trim())
+      .filter((id) => Boolean(id) && id !== 'user_admin' && id !== 'admin');
+
     const candidateIds = new Set<string>();
     rawIds.forEach((id) => {
-      const clean = id.startsWith('conv_') ? id.replace(/^conv_/, '') : id;
-      candidateIds.add(id);
-      candidateIds.add(clean);
-      candidateIds.add(`conv_${clean}`);
+      const clean = getCanonicalSellerChatId(id);
+      if (clean) {
+        candidateIds.add(clean);
+        candidateIds.add(`conv_${clean}`);
+      }
     });
-    // Also include user_admin
-    candidateIds.add('user_admin');
 
-    // 1. Delete from chats/{id}/messages/{messageId} across all candidate chat rooms
+    // 1. Delete from chats/{id}/messages/{messageId} across seller candidate chat rooms
     for (const cId of Array.from(candidateIds)) {
       try {
         const msgDocRef = doc(db, 'chats', cId, 'messages', messageId);
@@ -748,8 +1105,6 @@ export async function deleteChatMessage(
         messageId,
       });
     } catch {}
-
-    console.log(`[Firestore] Deleted chat message ${messageId} across candidates:`, Array.from(candidateIds));
   } catch (err) {
     console.warn('[Firestore] Error deleting chat message:', err);
   }
@@ -791,20 +1146,25 @@ export async function deleteAllChatMessages(
   chatId: string,
   extraCandidateIds?: string[]
 ): Promise<void> {
-  recordConversationCleared(chatId, extraCandidateIds);
+  const rawIds = [chatId, ...(extraCandidateIds || [])]
+    .map((id) => (id || '').trim())
+    .filter((id) => Boolean(id) && id !== 'user_admin' && id !== 'admin');
 
-  if (!db || (!chatId && (!extraCandidateIds || extraCandidateIds.length === 0))) return;
-  try {
-    const rawIds = [chatId, ...(extraCandidateIds || [])].map((id) => (id || '').trim()).filter(Boolean);
-    const candidateIds = new Set<string>();
-    rawIds.forEach((id) => {
-      const clean = id.startsWith('conv_') ? id.replace(/^conv_/, '') : id;
-      candidateIds.add(id);
+  const candidateIds = new Set<string>();
+  rawIds.forEach((id) => {
+    const clean = getCanonicalSellerChatId(id);
+    if (clean && clean !== 'user_admin' && clean !== 'admin') {
       candidateIds.add(clean);
       candidateIds.add(`conv_${clean}`);
-    });
+    }
+  });
 
-    for (const cId of Array.from(candidateIds)) {
+  const allCandidateList = Array.from(candidateIds);
+  recordConversationCleared(chatId, allCandidateList);
+
+  if (!db || allCandidateList.length === 0) return;
+  try {
+    for (const cId of allCandidateList) {
       try {
         const messagesCol = collection(db, 'chats', cId, 'messages');
         const snap = await getDocs(messagesCol);
@@ -824,6 +1184,8 @@ export async function deleteAllChatMessages(
         console.warn(`[Firestore] Error clearing subcollection messages for ${cId}:`, e);
       }
 
+      // Legacy messages: ONLY delete where conversationId === cId or senderId === cId
+      // CRITICAL: NEVER delete where receiverId === cId because receiverId could be user_admin!
       try {
         const legacyCol = collection(db, CHAT_COLLECTION);
         const qLegacy1 = query(legacyCol, where('conversationId', '==', cId));
@@ -837,17 +1199,10 @@ export async function deleteAllChatMessages(
         if (!snapLegacy2.empty) {
           await Promise.all(snapLegacy2.docs.map((d) => deleteDoc(d.ref)));
         }
-
-        const qLegacy3 = query(legacyCol, where('receiverId', '==', cId));
-        const snapLegacy3 = await getDocs(qLegacy3);
-        if (!snapLegacy3.empty) {
-          await Promise.all(snapLegacy3.docs.map((d) => deleteDoc(d.ref)));
-        }
       } catch (e) {
         console.warn(`[Firestore] Error clearing legacy messages for ${cId}:`, e);
       }
     }
-    console.log(`[Firestore] Cleared all chat messages and deleted room docs for candidates:`, Array.from(candidateIds));
   } catch (err) {
     console.warn('[Firestore] Error clearing chat messages:', err);
   }
@@ -943,15 +1298,20 @@ export async function deleteEntireConversationFromFirestore(
 ): Promise<void> {
   if (!conversationId) return;
 
-  const rawIds = [conversationId, ...(extraCandidateIds || [])].map((id) => (id || '').trim()).filter(Boolean);
+  const rawIds = [conversationId, ...(extraCandidateIds || [])]
+    .map((id) => (id || '').trim())
+    .filter((id) => Boolean(id) && id !== 'user_admin' && id !== 'admin');
+
   const candidateIds = new Set<string>();
   rawIds.forEach((id) => {
-    const clean = id.startsWith('conv_') ? id.replace(/^conv_/, '') : id;
-    candidateIds.add(id);
-    candidateIds.add(clean);
-    candidateIds.add(`conv_${clean}`);
+    const clean = getCanonicalSellerChatId(id);
+    if (clean && clean !== 'user_admin' && clean !== 'admin') {
+      candidateIds.add(clean);
+      candidateIds.add(`conv_${clean}`);
+    }
   });
   const allList = Array.from(candidateIds);
+  if (allList.length === 0) return;
 
   // 1. Clean localStorage
   try {

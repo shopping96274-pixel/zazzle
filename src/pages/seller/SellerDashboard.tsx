@@ -21,6 +21,7 @@ import {
   MoreHorizontal,
   Lock,
   X,
+  XCircle,
   Star,
   ChevronRight,
   ShoppingCart,
@@ -73,6 +74,7 @@ import {
 import { StatusBadge } from '../../components/common/Badge';
 import { Order, OrderStatus, WithdrawalMethod, Product, SellerWallet } from '../../types';
 import { listenToSellerRatingInFirestore, isOrderDeleted } from '../../services/firebaseKyc';
+import { isChatMessageDeleted, recordDeletedChatMessageId } from '../../services/firebaseChat';
 import { SellerTickerBar } from '../../components/seller/SellerTickerBar';
 import { TodayViewsCard } from '../../components/seller/TodayViewsCard';
 
@@ -353,23 +355,12 @@ export const SellerDashboard: React.FC<SellerDashboardProps> = ({ onNavigate }) 
     }
   }, [isStoreFrozen, onNavigate]);
 
-  // Real-time seller store dashboard activity tracking (saves/updates login session when seller enters dashboard)
+  // Record seller dashboard visit time once when seller opens dashboard (no continuous active polling)
   useEffect(() => {
     if (currentSeller && (currentSeller.email || (currentSeller as any).sellerName)) {
-      trackSellerStoreActivity(currentSeller, 'Store Dashboard Active');
+      trackSellerStoreActivity(currentSeller);
     }
-  }, [currentSeller?.id, currentSeller?.email, mobileTab, trackSellerStoreActivity]);
-
-  // Update activity when seller switches back to this browser tab
-  useEffect(() => {
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible' && currentSeller && (currentSeller.email || (currentSeller as any).sellerName)) {
-        trackSellerStoreActivity(currentSeller, 'Store Visit Active');
-      }
-    };
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, [currentSeller?.id, currentSeller?.email, trackSellerStoreActivity]);
+  }, [currentSeller?.id, currentSeller?.email]);
 
   // Helper to cleanly format shop name and merchant name without any "(Platform Admin)" or "(Admin)" text
   const rawShopName =
@@ -1201,31 +1192,31 @@ const getFixedCategoryCount = (name: string, id: string): string => {
   const [hasReceivedFloatingFirestore, setHasReceivedFloatingFirestore] = useState(false);
   const floatingRoomsRef = useRef<Record<string, any[]>>({});
 
+  const syncFirestoreRef = useRef(syncMessagesWithFirestore);
+  useEffect(() => {
+    syncFirestoreRef.current = syncMessagesWithFirestore;
+  }, [syncMessagesWithFirestore]);
+
+  const sellerCandidateIdsKey = React.useMemo(() => {
+    return sellerCandidateIds.slice().sort().join('|');
+  }, [sellerCandidateIds]);
+
   // Listen to live messages for this seller from Firestore across all candidate rooms
   useEffect(() => {
     if (sellerCandidateIds.length === 0 || !listenToChatMessages) return;
-    const unsubs: (() => void)[] = [];
 
-    sellerCandidateIds.forEach((roomId) => {
-      const unsub = listenToChatMessages(roomId, (liveMsgs) => {
-        floatingRoomsRef.current[roomId] = liveMsgs || [];
-        const combined = new Map<string, any>();
-        Object.values(floatingRoomsRef.current).forEach((msgs) => {
-          msgs.forEach((m) => combined.set(m.id, m));
-        });
-        const allLive = Array.from(combined.values());
-        setFloatingRealtimeMsgs(allLive);
-        setHasReceivedFloatingFirestore(true);
-
-        syncMessagesWithFirestore(sellerConv.id, allLive, sellerCandidateIds);
-      });
-      unsubs.push(unsub);
+    const unsub = listenToChatMessages(sellerCandidateIds, (liveMsgs) => {
+      setFloatingRealtimeMsgs(liveMsgs || []);
+      setHasReceivedFloatingFirestore(true);
+      if (liveMsgs && liveMsgs.length > 0) {
+        syncFirestoreRef.current(sellerConv.id, liveMsgs, sellerCandidateIds);
+      }
     });
 
     return () => {
-      unsubs.forEach((u) => u());
+      unsub();
     };
-  }, [sellerCandidateIds, listenToChatMessages, sellerConv.id, syncMessagesWithFirestore]);
+  }, [sellerCandidateIdsKey, listenToChatMessages, sellerConv.id]);
 
   // Instant broadcast listener for deletions & resets across tabs
   useEffect(() => {
@@ -1234,6 +1225,7 @@ const getFixedCategoryCount = (name: string, id: string): string => {
     bc.onmessage = (event) => {
       if (event.data?.type === 'MESSAGE_DELETED' && event.data.messageId) {
         const delId = event.data.messageId;
+        recordDeletedChatMessageId(delId);
         setFloatingRealtimeMsgs((prev) => prev.filter((m) => m.id !== delId));
         Object.keys(floatingRoomsRef.current).forEach((k) => {
           floatingRoomsRef.current[k] = (floatingRoomsRef.current[k] || []).filter((m) => m.id !== delId);
@@ -1243,6 +1235,20 @@ const getFixedCategoryCount = (name: string, id: string): string => {
         setFloatingRealtimeMsgs([]);
         floatingRoomsRef.current = {};
         syncMessagesWithFirestore(sellerConv.id, [], sellerCandidateIds);
+      } else if (event.data?.type === 'NEW_CHAT_MESSAGE' && event.data.message) {
+        const incoming = event.data.message;
+        if (
+          !isChatMessageDeleted(incoming.id) &&
+          (sellerCandidateIds.includes(incoming.conversationId) ||
+            sellerCandidateIds.includes(incoming.senderId) ||
+            ((incoming as any).receiverId && sellerCandidateIds.includes((incoming as any).receiverId)) ||
+            ((incoming as any).recipientId && sellerCandidateIds.includes((incoming as any).recipientId)))
+        ) {
+          setFloatingRealtimeMsgs((prev) => {
+            if (prev.some((m) => m.id === incoming.id)) return prev;
+            return [...prev, incoming];
+          });
+        }
       }
     };
     return () => {
@@ -1253,51 +1259,62 @@ const getFixedCategoryCount = (name: string, id: string): string => {
   }, [sellerConv.id, sellerCandidateIds, syncMessagesWithFirestore]);
 
   const mergedFloatingChatMessages = React.useMemo(() => {
-    if (hasReceivedFloatingFirestore) {
-      const map = new Map<string, any>();
-      // Real-time Firestore snapshot is ground truth
-      floatingRealtimeMsgs.forEach((m) => map.set(m.id, m));
-
-      // In flight check (sent in last 8s by seller)
-      const now = Date.now();
-      messages
-        .filter((m) => {
-          if (map.has(m.id)) return false;
-          const isOurThread =
-            sellerCandidateIds.includes(m.conversationId) ||
-            m.senderId === sellerIdentifier ||
-            (currentSeller?.id && m.senderId === currentSeller.id);
-          if (!isOurThread) return false;
-          const msgAge = now - new Date(m.timestamp).getTime();
-          return msgAge < 8000 && m.senderRole === 'SELLER';
-        })
-        .forEach((m) => map.set(m.id, m));
-
-      return Array.from(map.values()).sort(
-        (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-      );
-    }
-
     const map = new Map<string, any>();
-    messages
-      .filter(
-        (m) =>
-          sellerCandidateIds.includes(m.conversationId) ||
-          sellerCandidateIds.includes(m.senderId) ||
-          ((m as any).receiverId && sellerCandidateIds.includes((m as any).receiverId)) ||
-          ((m as any).recipientId && sellerCandidateIds.includes((m as any).recipientId))
-      )
+
+    const targetCandidateSet = new Set<string>();
+    sellerCandidateIds.forEach((id) => {
+      targetCandidateSet.add(id);
+      targetCandidateSet.add(id.replace(/^conv_/, ''));
+      targetCandidateSet.add(`conv_${id.replace(/^conv_/, '')}`);
+    });
+
+    // 1. Authoritative real-time Firestore messages
+    floatingRealtimeMsgs
+      .filter((m) => m && m.id && !isChatMessageDeleted(m.id))
       .forEach((m) => map.set(m.id, m));
-    return Array.from(map.values()).sort(
-      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-    );
+
+    // 2. Global messages state from StoreContext
+    messages
+      .filter((m) => {
+        if (!m || !m.id || isChatMessageDeleted(m.id)) return false;
+        const cleanConv = (m.conversationId || '').replace(/^conv_/, '');
+        const cleanSender = (m.senderId || '').replace(/^conv_/, '');
+        const cleanReceiver = ((m as any).receiverId || '').replace(/^conv_/, '');
+        const hasCandidateMatch =
+          Array.isArray((m as any).candidateIds) &&
+          (m as any).candidateIds.some(
+            (cid: string) => targetCandidateSet.has(cid) || targetCandidateSet.has(cid.replace(/^conv_/, ''))
+          );
+
+        return (
+          targetCandidateSet.has(m.conversationId) ||
+          targetCandidateSet.has(cleanConv) ||
+          targetCandidateSet.has(m.senderId) ||
+          targetCandidateSet.has(cleanSender) ||
+          ((m as any).receiverId && (targetCandidateSet.has((m as any).receiverId) || targetCandidateSet.has(cleanReceiver))) ||
+          hasCandidateMatch ||
+          (m.senderRole === 'ADMIN' && (
+            targetCandidateSet.has(m.conversationId) ||
+            targetCandidateSet.has(cleanConv) ||
+            targetCandidateSet.has((m as any).receiverId) ||
+            targetCandidateSet.has(cleanReceiver) ||
+            (m as any).receiverId === 'user_admin'
+          ))
+        );
+      })
+      .forEach((m) => {
+        if (!map.has(m.id)) {
+          map.set(m.id, m);
+        }
+      });
+
+    return Array.from(map.values())
+      .filter((m) => !isChatMessageDeleted(m.id))
+      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
   }, [
     messages,
     sellerCandidateIds,
     floatingRealtimeMsgs,
-    hasReceivedFloatingFirestore,
-    sellerIdentifier,
-    currentSeller?.id,
   ]);
 
   useEffect(() => {
@@ -1311,11 +1328,23 @@ const getFixedCategoryCount = (name: string, id: string): string => {
     const textToSend = floatingChatInput.trim();
     if (!textToSend && !floatingChatImage) return;
 
-    sendMessage(sellerConv.id, textToSend, floatingChatImage || undefined, {
+    const newMsg = sendMessage(sellerConv.id, textToSend, floatingChatImage || undefined, {
       senderId: sellerIdentifier,
       senderName: displayShopName ? `${displayShopName} (${displaySellerName})` : displaySellerName,
       senderRole: 'SELLER',
+      candidateIds: sellerCandidateIds,
+      sellerId: currentSeller?.id || sellerIdentifier,
     });
+
+    if (newMsg) {
+      setFloatingRealtimeMsgs((prev) => {
+        if (prev.some((m) => m.id === newMsg.id)) return prev;
+        return [...prev, newMsg];
+      });
+      setTimeout(() => {
+        floatingMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, 50);
+    }
 
     setFloatingChatInput('');
     setFloatingChatImage(null);

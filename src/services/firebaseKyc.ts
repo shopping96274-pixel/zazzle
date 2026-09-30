@@ -458,7 +458,7 @@ export async function saveSellerKycToFirestore(sellerData: {
     if (isPermissionError) {
       setFirestorePermissionDenied(true, error?.message || 'Missing or insufficient permissions');
       console.error(
-        '[Firestore] CRITICAL: Permission Denied while saving seller! Please update Firestore Rules in Firebase Console for project "new-zazzle".'
+        '[Firestore] CRITICAL: Permission Denied while saving seller! Please update Firestore Rules in Firebase Console for project "zazzel-shopping-store-c7bc8".'
       );
     } else {
       console.warn('[Firestore] Notice while syncing KYC to Firestore:', error);

@@ -88,165 +88,8 @@ export function parseDeviceAndBrowser(uaString?: string): {
 }
 
 /**
- * Attempts to retrieve real client IP and location with quick timeout.
- * Uses ipwho.is as primary real-time geolocation lookup, falling back to secondary APIs
- * or client-detected system timezone rather than arbitrary static locations.
- */
-/**
- * Comprehensive timezone to real location mapping.
- * Provides instant, zero-network fallback that accurately identifies user's real city & country.
- */
-export const TIMEZONE_TO_LOCATION: Record<string, string> = {
-  'Asia/Karachi': 'Karachi, Pakistan',
-  'Asia/Lahore': 'Lahore, Pakistan',
-  'Asia/Islamabad': 'Islamabad, Pakistan',
-  'Asia/Kolkata': 'Kolkata, India',
-  'Asia/Delhi': 'Delhi, India',
-  'Asia/Mumbai': 'Mumbai, India',
-  'Asia/Chennai': 'Chennai, India',
-  'Asia/Bengaluru': 'Bengaluru, India',
-  'Asia/Dhaka': 'Dhaka, Bangladesh',
-  'Asia/Colombo': 'Colombo, Sri Lanka',
-  'Asia/Kathmandu': 'Kathmandu, Nepal',
-  'Asia/Kabul': 'Kabul, Afghanistan',
-  'Asia/Dubai': 'Dubai, United Arab Emirates',
-  'Asia/Abu_Dhabi': 'Abu Dhabi, United Arab Emirates',
-  'Asia/Muscat': 'Muscat, Oman',
-  'Asia/Riyadh': 'Riyadh, Saudi Arabia',
-  'Asia/Jeddah': 'Jeddah, Saudi Arabia',
-  'Asia/Qatar': 'Doha, Qatar',
-  'Asia/Kuwait': 'Kuwait City, Kuwait',
-  'Asia/Bahrain': 'Manama, Bahrain',
-  'Asia/Singapore': 'Singapore',
-  'Asia/Kuala_Lumpur': 'Kuala Lumpur, Malaysia',
-  'Asia/Jakarta': 'Jakarta, Indonesia',
-  'Asia/Bangkok': 'Bangkok, Thailand',
-  'Asia/Manila': 'Manila, Philippines',
-  'Asia/Hong_Kong': 'Hong Kong',
-  'Asia/Tokyo': 'Tokyo, Japan',
-  'Asia/Seoul': 'Seoul, South Korea',
-  'Europe/London': 'London, United Kingdom',
-  'Europe/Berlin': 'Berlin, Germany',
-  'Europe/Paris': 'Paris, France',
-  'Europe/Rome': 'Rome, Italy',
-  'Europe/Madrid': 'Madrid, Spain',
-  'Europe/Amsterdam': 'Amsterdam, Netherlands',
-  'Europe/Istanbul': 'Istanbul, Turkey',
-  'America/New_York': 'New York, US',
-  'America/Chicago': 'Chicago, US',
-  'America/Los_Angeles': 'Los Angeles, US',
-  'America/Toronto': 'Toronto, Canada',
-  'Australia/Sydney': 'Sydney, Australia',
-};
-
-/**
- * Gets real client geographic location derived from browser system timezone.
- */
-export function getSystemTimezoneLocation(): string {
-  try {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    if (tz && TIMEZONE_TO_LOCATION[tz]) {
-      return TIMEZONE_TO_LOCATION[tz];
-    }
-    if (tz) {
-      const parts = tz.split('/').reverse();
-      return parts.map((p) => p.replace(/_/g, ' ')).join(', ');
-    }
-  } catch {}
-  return 'Active Seller Device';
-}
-
-/**
- * Retrieves the client's actual real IP and real physical location.
- * Prioritizes live browser geolocation APIs (ipwho.is, freeipapi.com) and native browser timezone.
- * Strictly avoids default USA fallbacks.
- */
-export async function getClientIpAndLocation(fallback?: { city?: string; country?: string }): Promise<{
-  ip: string;
-  location: string;
-}> {
-  const systemTz = (typeof Intl !== 'undefined' && Intl.DateTimeFormat)
-    ? Intl.DateTimeFormat().resolvedOptions().timeZone || ''
-    : '';
-  const tzLoc = getSystemTimezoneLocation();
-  const isTzInAmerica = systemTz.startsWith('America/');
-
-  // 1. If seller already has a registered valid city and country from their profile, use it!
-  const hasValidProfileLocation = Boolean(
-    fallback?.city &&
-    fallback.city.trim() &&
-    fallback?.country &&
-    fallback.country.trim() &&
-    fallback.country.toUpperCase() !== 'USA' &&
-    fallback.country.toUpperCase() !== 'UNITED STATES'
-  );
-
-  let detectedIp = '';
-  let resolvedLocation = hasValidProfileLocation
-    ? `${fallback!.city.trim()}, ${fallback!.country.trim()}`
-    : tzLoc;
-
-  // 2. Fetch public client IP (from ipify or ipwho.is)
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2000);
-    const res = await fetch('https://api.ipify.org?format=json', { signal: controller.signal });
-    clearTimeout(timeoutId);
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.ip) {
-        detectedIp = data.ip;
-      }
-    }
-  } catch {}
-
-  // 3. If we don't have profile location, try geo-ip lookup with cloud proxy defense:
-  if (!hasValidProfileLocation) {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3000);
-      const res = await fetch('https://ipwho.is/', { signal: controller.signal });
-      clearTimeout(timeoutId);
-
-      if (res.ok) {
-        const data = await res.json();
-        if (data && data.success !== false && data.ip) {
-          if (!detectedIp) detectedIp = data.ip;
-
-          const isCountryUSA =
-            data.country === 'United States' ||
-            data.country === 'US' ||
-            data.country_code === 'US';
-
-          // Cloud Proxy Guard: If the geo-IP returned USA, but the client browser timezone is NOT in America,
-          // then the USA result is a cloud container or datacenter proxy! Do NOT use USA.
-          if (isCountryUSA && !isTzInAmerica) {
-            resolvedLocation = tzLoc || (fallback?.city ? `${fallback.city}, ${fallback.country || ''}` : 'Active Device');
-          } else {
-            const parts = [data.city, data.region, data.country].filter(Boolean);
-            if (parts.length > 0) {
-              resolvedLocation = parts.join(', ');
-            }
-          }
-        }
-      }
-    } catch {}
-  }
-
-  // 4. Secondary fallback for geo lookup if still needed
-  if (!resolvedLocation || resolvedLocation === 'Active Seller Device') {
-    resolvedLocation = tzLoc || 'Active Device';
-  }
-
-  return {
-    ip: detectedIp || 'Direct Connection',
-    location: resolvedLocation,
-  };
-}
-
-/**
  * Formats a Date or timestamp into exact readable format according to the user's system time & locale.
- * e.g. "Sep 9, 2026, 01:15:30 PM"
+ * e.g. "Sep 26, 2026, 01:15:30 PM"
  */
 export function formatLoginTime(timestamp: number | Date = new Date()): string {
   const d = typeof timestamp === 'number' ? new Date(timestamp) : timestamp;
@@ -262,7 +105,14 @@ export function formatLoginTime(timestamp: number | Date = new Date()): string {
 }
 
 /**
- * Initial seed sessions so admin views active records right away
+ * Legacy stub - IP/Location tracking completely removed per user instructions.
+ */
+export async function getClientIpAndLocation(): Promise<{ ip: string; location: string }> {
+  return { ip: '', location: '' };
+}
+
+/**
+ * Initial seed sessions showing visit times without IP/Location tracking
  */
 export const INITIAL_SELLER_SESSIONS: SellerLoginSession[] = [
   {
@@ -275,9 +125,8 @@ export const INITIAL_SELLER_SESSIONS: SellerLoginSession[] = [
     deviceCategory: 'mobile',
     browser: 'Chrome',
     userAgent: 'Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.6613.88 Mobile Safari/537.36',
-    ip: '39.45.12.89',
-    location: 'Karachi, Sindh, PK',
     loginTime: formatLoginTime(Date.now() - 1000 * 60 * 18), // 18 mins ago
+    visitedAt: formatLoginTime(Date.now() - 1000 * 60 * 18),
     timestamp: Date.now() - 1000 * 60 * 18,
   },
   {
@@ -290,9 +139,8 @@ export const INITIAL_SELLER_SESSIONS: SellerLoginSession[] = [
     deviceCategory: 'desktop',
     browser: 'Microsoft Edge',
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 Edg/128.0.2739.42',
-    ip: '182.180.45.12',
-    location: 'Lahore, Punjab, PK',
     loginTime: formatLoginTime(Date.now() - 1000 * 60 * 65), // 1 hour ago
+    visitedAt: formatLoginTime(Date.now() - 1000 * 60 * 65),
     timestamp: Date.now() - 1000 * 60 * 65,
   },
   {
@@ -305,9 +153,8 @@ export const INITIAL_SELLER_SESSIONS: SellerLoginSession[] = [
     deviceCategory: 'mobile',
     browser: 'Safari',
     userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_6_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1',
-    ip: '94.200.12.84',
-    location: 'Dubai, UAE',
     loginTime: formatLoginTime(Date.now() - 1000 * 60 * 140), // 2 hours ago
+    visitedAt: formatLoginTime(Date.now() - 1000 * 60 * 140),
     timestamp: Date.now() - 1000 * 60 * 140,
   },
   {
@@ -320,15 +167,15 @@ export const INITIAL_SELLER_SESSIONS: SellerLoginSession[] = [
     deviceCategory: 'desktop',
     browser: 'Chrome',
     userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-    ip: '49.36.128.214',
-    location: 'Mumbai, MH, IN',
     loginTime: formatLoginTime(Date.now() - 1000 * 60 * 360), // 6 hours ago
+    visitedAt: formatLoginTime(Date.now() - 1000 * 60 * 360),
     timestamp: Date.now() - 1000 * 60 * 360,
   },
 ];
 
 /**
- * Saves a new seller login session to LocalStorage, Firestore, and broadcasts it across tabs.
+ * Saves a seller dashboard visit record to LocalStorage and Firestore.
+ * Zero location and IP tracking, zero continuous polling.
  */
 export async function saveSellerLoginSession(
   sessionInput: Partial<SellerLoginSession> & {
@@ -339,11 +186,8 @@ export async function saveSellerLoginSession(
   const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
   const parsed = parseDeviceAndBrowser(sessionInput.userAgent || ua);
   const now = Date.now();
+  const timeFormatted = sessionInput.loginTime || formatLoginTime(now);
 
-  // 1. Determine session ID:
-  // If sessionInput.id is provided, use it.
-  // Otherwise, if the seller already has an existing active session from the last 20 minutes in localStorage,
-  // update that session's timestamp and activity instead of creating duplicate records.
   let rawExisting: SellerLoginSession[] = [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -352,6 +196,7 @@ export async function saveSellerLoginSession(
     rawExisting = INITIAL_SELLER_SESSIONS;
   }
 
+  // Update existing session for this seller if visited within the last 60 minutes, or generate unique ID
   let targetId = sessionInput.id;
   if (!targetId && sessionInput.email) {
     const emailNorm = sessionInput.email.toLowerCase().trim();
@@ -359,7 +204,7 @@ export async function saveSellerLoginSession(
       (s) =>
         s.email &&
         s.email.toLowerCase().trim() === emailNorm &&
-        now - s.timestamp < 20 * 60 * 1000 // within 20 minutes
+        now - s.timestamp < 60 * 60 * 1000
     );
     if (recentSession) {
       targetId = recentSession.id;
@@ -381,29 +226,15 @@ export async function saveSellerLoginSession(
     deviceCategory: sessionInput.deviceCategory || parsed.deviceCategory,
     browser: sessionInput.browser || parsed.browser,
     userAgent: sessionInput.userAgent || ua,
-    ip: sessionInput.ip || 'Direct Connection',
-    location: (() => {
-      const inputLoc = sessionInput.location?.trim();
-      const tzLoc = getSystemTimezoneLocation();
-      const systemTz = (typeof Intl !== 'undefined' && Intl.DateTimeFormat)
-        ? Intl.DateTimeFormat().resolvedOptions().timeZone || ''
-        : '';
-      const isTzInAmerica = systemTz.startsWith('America/');
-      if (inputLoc && (inputLoc.includes('United States') || inputLoc.includes('USA') || inputLoc === 'US') && !isTzInAmerica) {
-        return tzLoc;
-      }
-      return inputLoc || tzLoc;
-    })(),
-    loginTime: sessionInput.loginTime || formatLoginTime(now),
+    loginTime: timeFormatted,
+    visitedAt: timeFormatted,
     timestamp: now,
-    activityType: sessionInput.activityType || 'Store Dashboard Active',
-    lastActiveTime: formatLoginTime(now),
   };
 
-  // 1. Save to localStorage (put updated/new session at the very front)
+  // 1. Save to localStorage
   try {
     const updated = [finalSession, ...rawExisting.filter((s) => s.id !== finalSession.id)];
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(updated.slice(0, 100))); // Keep last 100
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(updated.slice(0, 100)));
   } catch (err) {
     console.warn('[SessionLogging] localStorage write error:', err);
   }
@@ -415,14 +246,13 @@ export async function saveSellerLoginSession(
     } catch {}
   }
 
-  // 3. Save to Firestore
+  // 3. Save to Firestore (only once on visit, minimal payload with no IP/location)
   if (db) {
     try {
       const docRef = doc(db, LOGIN_SESSIONS_COLLECTION, finalSession.id);
       await setDoc(docRef, finalSession, { merge: true });
-      console.log(`[Firestore] Recorded seller login session for ${finalSession.sellerName} (${finalSession.email})`);
     } catch (err) {
-      console.warn('[Firestore] Error saving seller login session:', err);
+      console.warn('[Firestore] Error saving seller visit session:', err);
     }
   }
 

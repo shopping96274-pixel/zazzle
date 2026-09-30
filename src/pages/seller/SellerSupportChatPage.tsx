@@ -5,7 +5,13 @@ import {
   recordDeletedChatMessageId,
   getConversationClearedTime,
   recordConversationCleared,
+  clearConversationClearedTime,
+  restoreChatThread,
   getMessageTimestampMs,
+  getSellerChatRoomId,
+  getCanonicalSellerChatId,
+  subscribeToChatMessages,
+  sendRealtimeChatMessage,
 } from '../../services/firebaseChat';
 import {
   ArrowLeft,
@@ -169,110 +175,32 @@ export const SellerSupportChatPage: React.FC<SellerSupportChatPageProps> = ({ on
     ? `${currentSeller.shopName} (${currentSeller.sellerName || currentUser.name || 'Merchant'})`
     : (currentUser.name || 'Merchant');
 
-  // Get or initialize active conversation with Customer Care
-  const activeConv = startOrGetSupportConversation(
-    sellerIdentifier,
-    sellerDisplayName,
-    'SELLER'
-  );
-
-  const [hasReceivedFirestore, setHasReceivedFirestore] = useState(false);
-  const roomMessagesRef = useRef<Record<string, any[]>>({});
-
-  // Compute all possible candidate IDs for this seller thread
-  const sellerRoomIds = React.useMemo(() => {
+  // Candidate room IDs for this seller to ensure 100% real-time syncing with admin
+  const candidateRoomIds = React.useMemo(() => {
     const ids = new Set<string>();
-    if (sellerIdentifier) {
-      ids.add(sellerIdentifier);
-      ids.add(sellerIdentifier.replace(/^conv_/, ''));
-      ids.add(`conv_${sellerIdentifier.replace(/^conv_/, '')}`);
-    }
-    if (currentSeller?.id) {
-      ids.add(currentSeller.id);
-      ids.add(currentSeller.id.replace(/^conv_/, ''));
-      ids.add(`conv_${currentSeller.id.replace(/^conv_/, '')}`);
-    }
-    if (currentSeller?.userId) {
-      ids.add(currentSeller.userId);
-      ids.add(currentSeller.userId.replace(/^conv_/, ''));
-      ids.add(`conv_${currentSeller.userId.replace(/^conv_/, '')}`);
-    }
-    if (currentSeller?.email) {
-      const em = currentSeller.email.toLowerCase().trim();
-      ids.add(em);
-      ids.add(`email_${em}`);
-    }
-    if (currentUser?.email) {
-      const em = currentUser.email.toLowerCase().trim();
-      ids.add(em);
-      ids.add(`email_${em}`);
-    }
-    if (activeConv?.id) {
-      ids.add(activeConv.id);
-      ids.add(activeConv.id.replace(/^conv_/, ''));
-      ids.add(`conv_${activeConv.id.replace(/^conv_/, '')}`);
-    }
+    if (currentSeller?.id) ids.add(getCanonicalSellerChatId(currentSeller.id));
+    if (currentSeller?.userId) ids.add(getCanonicalSellerChatId(currentSeller.userId));
+    if (currentUser?.id && currentUser.id !== 'guest_visitor') ids.add(getCanonicalSellerChatId(currentUser.id));
+    if (sellerIdentifier) ids.add(getCanonicalSellerChatId(sellerIdentifier));
     return Array.from(ids).filter(Boolean);
-  }, [
-    sellerIdentifier,
-    currentSeller?.id,
-    currentSeller?.userId,
-    currentSeller?.email,
-    currentUser?.email,
-    activeConv?.id,
-  ]);
+  }, [currentSeller, currentUser.id, sellerIdentifier]);
 
-  // Real-time Firestore subcollection listeners across ALL candidate seller chat threads + user_admin
+  const chatRoomId = candidateRoomIds[0] || 'support_general';
+
+  // Real-time Firestore listener with onSnapshot - instantly syncs both admin and seller messages
   useEffect(() => {
-    if (sellerRoomIds.length === 0 || !listenToChatMessages) return;
-    const unsubs: (() => void)[] = [];
+    if (candidateRoomIds.length === 0) return;
 
-    // Listen to all seller candidate rooms
-    sellerRoomIds.forEach((roomId) => {
-      const unsub = listenToChatMessages(roomId, (liveMsgs) => {
-        roomMessagesRef.current[roomId] = liveMsgs || [];
-        const combined = new Map<string, any>();
-        Object.values(roomMessagesRef.current).forEach((msgs) => {
-          msgs.forEach((m) => combined.set(m.id, m));
-        });
-        const allLive = Array.from(combined.values());
-        setRealtimeMessages(allLive);
-        setHasReceivedFirestore(true);
-
-        syncMessagesWithFirestore(activeConv.id, allLive, sellerRoomIds);
-      });
-      unsubs.push(unsub);
+    const unsub = subscribeToChatMessages(candidateRoomIds, (liveMsgs) => {
+      setRealtimeMessages(liveMsgs || []);
     });
-
-    // Also listen to user_admin room in case admin messages were routed there
-    const unsubAdmin = listenToChatMessages('user_admin', (adminMsgs) => {
-      if (!adminMsgs || adminMsgs.length === 0) return;
-      const relevant = adminMsgs.filter((m) => {
-        const rId = (m as any).receiverId;
-        const cId = m.conversationId;
-        if (rId && sellerRoomIds.includes(rId)) return true;
-        if (cId && sellerRoomIds.includes(cId)) return true;
-        return (
-          m.senderRole === 'ADMIN' &&
-          (sellerRoomIds.some((id) => cId?.includes(id)) || (!rId && !cId))
-        );
-      });
-      roomMessagesRef.current['user_admin'] = relevant;
-      const combined = new Map<string, any>();
-      Object.values(roomMessagesRef.current).forEach((msgs) => {
-        msgs.forEach((m) => combined.set(m.id, m));
-      });
-      setRealtimeMessages(Array.from(combined.values()));
-      setHasReceivedFirestore(true);
-    });
-    unsubs.push(unsubAdmin);
 
     return () => {
-      unsubs.forEach((u) => u());
+      unsub();
     };
-  }, [sellerRoomIds, listenToChatMessages, activeConv.id, syncMessagesWithFirestore]);
+  }, [candidateRoomIds.slice().sort().join('|')]);
 
-  // Instant broadcast listener for deletions & resets across tabs
+  // Instant cross-tab broadcast listener for deletions & resets across tabs
   useEffect(() => {
     if (typeof BroadcastChannel === 'undefined') return;
     const bc = new BroadcastChannel('nexus_chat_channel');
@@ -281,15 +209,20 @@ export const SellerSupportChatPage: React.FC<SellerSupportChatPageProps> = ({ on
         const delId = event.data.messageId;
         recordDeletedChatMessageId(delId);
         setRealtimeMessages((prev) => prev.filter((m) => m.id !== delId));
-        Object.keys(roomMessagesRef.current).forEach((k) => {
-          roomMessagesRef.current[k] = (roomMessagesRef.current[k] || []).filter((m) => m.id !== delId);
-        });
-        syncMessagesWithFirestore(activeConv.id, [], [delId]);
-      } else if (event.data?.type === 'CONVERSATION_RESET') {
-        recordConversationCleared(activeConv.id, sellerRoomIds);
-        setRealtimeMessages([]);
-        roomMessagesRef.current = {};
-        syncMessagesWithFirestore(activeConv.id, [], sellerRoomIds);
+      } else if (event.data?.type === 'NEW_CHAT_MESSAGE' && event.data.message) {
+        const incoming = event.data.message;
+        if (
+          !isChatMessageDeleted(incoming.id) &&
+          (candidateRoomIds.includes(incoming.conversationId) ||
+            candidateRoomIds.includes((incoming as any).chatId) ||
+            candidateRoomIds.includes(incoming.senderId) ||
+            candidateRoomIds.includes((incoming as any).receiverId))
+        ) {
+          setRealtimeMessages((prev) => {
+            if (prev.some((m) => m.id === incoming.id)) return prev;
+            return [...prev, incoming];
+          });
+        }
       }
     };
     return () => {
@@ -297,70 +230,55 @@ export const SellerSupportChatPage: React.FC<SellerSupportChatPageProps> = ({ on
         bc.close();
       } catch {}
     };
-  }, [activeConv.id, sellerRoomIds, syncMessagesWithFirestore]);
+  }, [candidateRoomIds.slice().sort().join('|')]);
 
-  // Filter & merge messages for this conversation - Firestore + StoreContext unified
+  // Filter & merge messages for this conversation - Firestore real-time authoritative
   const conversationMessages = React.useMemo(() => {
     const map = new Map<string, any>();
-    const clearedAt = getConversationClearedTime(activeConv?.id || sellerIdentifier);
 
-    // 1. Authoritative real-time Firestore messages
-    realtimeMessages.forEach((m) => {
-      if (isChatMessageDeleted(m.id)) return;
-      if (clearedAt > 0 && new Date(m.timestamp).getTime() <= clearedAt) return;
-      map.set(m.id, m);
-    });
+    // 1. Initial fallback from StoreContext messages
+    messages
+      .filter((m) => {
+        if (!m || !m.id || isChatMessageDeleted(m.id)) return false;
+        const cleanConv = (m.conversationId || '').replace(/^conv_/, '');
+        const cleanSender = (m.senderId || '').replace(/^conv_/, '');
+        const cleanReceiver = ((m as any).receiverId || '').replace(/^conv_/, '');
+        return (
+          candidateRoomIds.includes(m.conversationId) ||
+          candidateRoomIds.includes(cleanConv) ||
+          candidateRoomIds.includes(m.senderId) ||
+          candidateRoomIds.includes(cleanSender) ||
+          candidateRoomIds.includes((m as any).receiverId) ||
+          candidateRoomIds.includes(cleanReceiver)
+        );
+      })
+      .forEach((m) => map.set(m.id, m));
 
-    // 2. StoreContext messages (loaded from Firestore top-level chat_messages or persistent local state)
-    messages.forEach((m) => {
-      if (map.has(m.id)) return;
-      if (isChatMessageDeleted(m.id)) return;
-      if (clearedAt > 0 && new Date(m.timestamp).getTime() <= clearedAt) return;
-
-      const isOurThread =
-        sellerRoomIds.includes(m.conversationId) ||
-        m.senderId === sellerIdentifier ||
-        (currentSeller?.id && (m.senderId === currentSeller.id || (m as any).receiverId === currentSeller.id)) ||
-        (currentSeller?.userId && (m.senderId === currentSeller.userId || (m as any).receiverId === currentSeller.userId)) ||
-        ((m as any).receiverId && sellerRoomIds.includes((m as any).receiverId)) ||
-        (m.senderRole === 'ADMIN' && (
-          sellerRoomIds.includes(m.conversationId) ||
-          sellerRoomIds.includes((m as any).receiverId) ||
-          (m as any).receiverId === 'user_admin' ||
-          (m.conversationId && sellerRoomIds.some((id) => m.conversationId.includes(id) || id.includes(m.conversationId)))
-        ));
-
-      if (isOurThread) {
-        map.set(m.id, m);
-      }
-    });
+    // 2. Real-time authoritative messages from Firestore
+    realtimeMessages
+      .filter((m) => m && m.id && !isChatMessageDeleted(m.id))
+      .forEach((m) => map.set(m.id, m));
 
     return Array.from(map.values()).sort((a, b) => {
-      const diff = getMessageTimestampMs(a) - getMessageTimestampMs(b);
-      if (diff !== 0) return diff;
+      const timeA = (a as any).clientTimestamp || new Date(a.timestamp).getTime();
+      const timeB = (b as any).clientTimestamp || new Date(b.timestamp).getTime();
+      if (timeA !== timeB) return timeA - timeB;
       return (a.id || '').localeCompare(b.id || '');
     });
-  }, [
-    messages,
-    activeConv?.id,
-    sellerRoomIds,
-    realtimeMessages,
-    sellerIdentifier,
-    currentSeller?.id,
-    currentSeller?.userId,
-  ]);
+  }, [realtimeMessages, messages, candidateRoomIds]);
 
-  // Auto-scroll on new messages
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [conversationMessages, isAgentTyping]);
-
-  // Mark as read when entering
-  useEffect(() => {
-    if (activeConv) {
-      markConversationAsRead(activeConv.id, 'SELLER');
+  // Smooth auto-scroll to latest message
+  const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior, block: 'end' });
     }
-  }, [activeConv.id, conversationMessages.length]);
+  };
+
+  useEffect(() => {
+    scrollToBottom('smooth');
+    const timer = setTimeout(() => scrollToBottom('smooth'), 120);
+    return () => clearTimeout(timer);
+  }, [conversationMessages.length, isAgentTyping, selectedImage]);
 
   // Auto-adjust textarea height dynamically up to 120px
   useEffect(() => {
@@ -379,6 +297,7 @@ export const SellerSupportChatPage: React.FC<SellerSupportChatPageProps> = ({ on
     setIsRefreshing(true);
     setTimeout(() => {
       setIsRefreshing(false);
+      scrollToBottom('smooth');
     }, 600);
   };
 
@@ -407,19 +326,51 @@ export const SellerSupportChatPage: React.FC<SellerSupportChatPageProps> = ({ on
     if (!messageContent && !selectedImage) return;
 
     const imgPayload = selectedImage || undefined;
-
-    // Send the seller's message directly to Firestore & admin
-    sendMessage(activeConv.id, messageContent, imgPayload, {
-      senderId: sellerIdentifier,
-      senderName: sellerDisplayName,
-      senderRole: 'SELLER',
-    });
-
     setInputText('');
     setSelectedImage(null);
     if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = '24px';
     }
+
+    const tempId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const nowIso = new Date().toISOString();
+
+    // 1. Instant optimistic push to local real-time feed (0ms latency)
+    const tempMsg = {
+      id: tempId,
+      messageId: tempId,
+      conversationId: chatRoomId,
+      senderId: sellerIdentifier,
+      receiverId: 'user_admin',
+      senderName: sellerDisplayName,
+      senderRole: 'SELLER' as const,
+      text: messageContent,
+      imageUrl: imgPayload,
+      timestamp: nowIso,
+      clientTimestamp: Date.now(),
+      isRead: false,
+    };
+
+    setRealtimeMessages((prev) => {
+      if (prev.some((m) => m.id === tempId)) return prev;
+      return [...prev, tempMsg];
+    });
+
+    scrollToBottom('smooth');
+
+    // 2. Direct real-time write to Firestore
+    sendRealtimeChatMessage({
+      chatRoomId,
+      senderId: sellerIdentifier,
+      senderRole: 'SELLER',
+      senderName: sellerDisplayName,
+      text: messageContent,
+      imageUrl: imgPayload,
+      messageId: tempId,
+      sellerProfile: currentSeller || undefined,
+    }).catch((err) => {
+      console.warn('[Firestore Chat] sendRealtimeChatMessage error:', err);
+    });
   };
 
   // Keyboard interaction:
@@ -586,7 +537,7 @@ export const SellerSupportChatPage: React.FC<SellerSupportChatPageProps> = ({ on
               onClick={() => {
                 updateSellerStatus(currentSeller.id, 'APPROVED');
                 sendMessage(
-                  activeConv.id,
+                  chatRoomId,
                   '🎉 Congratulations! Your store has been verified and approved. You can now access your full seller dashboard.',
                   undefined,
                   {
@@ -615,9 +566,49 @@ export const SellerSupportChatPage: React.FC<SellerSupportChatPageProps> = ({ on
             </div>
           </div>
 
+          {/* Empty Conversation Welcome State */}
+          {conversationMessages.length === 0 && (
+            <div className="flex flex-col items-center justify-center py-12 px-4 text-center my-auto">
+              <div className="w-16 h-16 rounded-2xl bg-amber-500/10 text-amber-500 border border-amber-500/20 flex items-center justify-center mb-3 shadow-xs">
+                <Headphones className="w-8 h-8" />
+              </div>
+              <h3 className="text-sm font-bold text-slate-900 mb-1">Customer Care Desk Ready</h3>
+              <p className="text-xs text-slate-500 max-w-sm leading-relaxed mb-4">
+                Welcome to official customer care. Send a message or attach photos below, and our team will assist you immediately.
+              </p>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleSendMessage('Hello Customer Care, I need assistance with my merchant store.')}
+                  className="px-3 py-1.5 bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 rounded-xl text-xs font-semibold cursor-pointer shadow-2xs transition-colors"
+                >
+                  👋 "Need help with my store"
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSendMessage('How can I unfreeze my store account?')}
+                  className="px-3 py-1.5 bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 rounded-xl text-xs font-semibold cursor-pointer shadow-2xs transition-colors"
+                >
+                  🔓 "How to unfreeze store"
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Messages Loop */}
           {conversationMessages.map((msg, index) => {
             const isCustomerCare = msg.senderRole === 'ADMIN' || msg.senderId === 'user_admin';
+            const msgTime = (() => {
+              try {
+                const t = msg.timestamp || (msg as any).clientTimestamp;
+                if (!t) return '';
+                const d = new Date(t);
+                if (isNaN(d.getTime())) return '';
+                return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+              } catch {
+                return '';
+              }
+            })();
 
             return (
               <div
@@ -648,6 +639,15 @@ export const SellerSupportChatPage: React.FC<SellerSupportChatPageProps> = ({ on
                           {msg.text}
                         </p>
                       )}
+
+                      {/* Time & Verified Indicator */}
+                      <div className="flex items-center justify-between gap-3 mt-1.5 pt-1 border-t border-slate-100 text-[10px]">
+                        <span className="text-slate-400 font-medium">{msgTime}</span>
+                        <span className="text-amber-600 font-semibold flex items-center gap-1">
+                          <CheckCircle2 className="w-2.5 h-2.5 text-emerald-500" />
+                          Official Care
+                        </span>
+                      </div>
                     </div>
                   </div>
                 ) : (
@@ -670,6 +670,12 @@ export const SellerSupportChatPage: React.FC<SellerSupportChatPageProps> = ({ on
                         {msg.text}
                       </p>
                     )}
+
+                    {/* Time & Read Checkmark */}
+                    <div className="flex items-center justify-end gap-1.5 mt-1.5 pt-1 border-t border-slate-800/80 text-[10px]">
+                      <span className="text-slate-400 font-medium">{msgTime}</span>
+                      <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                    </div>
                   </div>
                 )}
               </div>

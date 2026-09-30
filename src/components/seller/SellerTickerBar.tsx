@@ -1,9 +1,7 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
-  listenToSellerTickerItems,
-  getLocalCachedTickerItems,
+  DEFAULT_TICKER_ITEMS,
 } from '../../services/firebaseTicker';
-import { SellerTickerItem } from '../../types';
 import { Handshake, Sparkles, ExternalLink, Pause, Play } from 'lucide-react';
 
 interface SellerTickerBarProps {
@@ -11,28 +9,14 @@ interface SellerTickerBarProps {
 }
 
 export const SellerTickerBar: React.FC<SellerTickerBarProps> = ({ className = '' }) => {
-  const [tickerItems, setTickerItems] = useState<SellerTickerItem[]>(() =>
-    getLocalCachedTickerItems()
-  );
   const [isPaused, setIsPaused] = useState(false);
 
-  // Subscribe to real-time Firebase updates
-  useEffect(() => {
-    const unsubscribe = listenToSellerTickerItems((updatedItems) => {
-      setTickerItems(updatedItems);
-    });
-
-    return () => {
-      unsubscribe();
-    };
-  }, []);
-
-  // Filter only active items and sort by order
+  // Static partner items directly hardcoded - Zero Firebase load
   const activeItems = useMemo(() => {
-    return tickerItems
+    return DEFAULT_TICKER_ITEMS
       .filter((item) => item.status === 'active')
       .sort((a, b) => (a.order ?? 99) - (b.order ?? 99));
-  }, [tickerItems]);
+  }, []);
 
   if (activeItems.length === 0) {
     return null;

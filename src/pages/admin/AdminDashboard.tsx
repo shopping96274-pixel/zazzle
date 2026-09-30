@@ -72,6 +72,7 @@ import {
   Sliders,
   RotateCcw,
   Flame,
+  UserPlus,
 } from 'lucide-react';
 import {
   DEFAULT_ADMIN_EMAIL,
@@ -79,6 +80,13 @@ import {
 import {
   isChatThreadDeleted,
   getMessageTimestampMs,
+  restoreChatThread,
+  clearConversationClearedTime,
+  isChatMessageDeleted,
+  recordDeletedChatMessageId,
+  getSellerChatRoomId,
+  subscribeToChatMessages,
+  sendRealtimeChatMessage,
 } from '../../services/firebaseChat';
 import {
   getFirestorePermissionStatus,
@@ -90,14 +98,9 @@ import {
   setSoundEnabled,
 } from '../../utils/audioAlert';
 import { StatusBadge } from '../../components/common/Badge';
-import { StoreMainPageManager } from '../../components/admin/StoreMainPageManager';
 import { StoreContactsManager } from '../../components/admin/StoreContactsManager';
-import { SellerTickerManager } from '../../components/admin/SellerTickerManager';
-import { PublicProductTickerManager } from '../../components/admin/PublicProductTickerManager';
-import { InvitationCodeManager } from '../../components/admin/InvitationCodeManager';
-import { StoreBrandingManager } from '../../components/admin/StoreBrandingManager';
+import { PendingSellersManager } from '../../components/admin/PendingSellersManager';
 import { SellerLoginSessionsView } from '../../components/admin/SellerLoginSessionsView';
-import { SubscriptionPlanManager } from '../../components/admin/SubscriptionPlanManager';
 import { FirebaseSaverHeaderBadge } from '../../components/admin/FirebaseSaverHeaderBadge';
 import {
   FeatureLockKey,
@@ -117,6 +120,7 @@ import {
   WithdrawalRequest,
   ProductStatus,
   Conversation,
+  Message,
 } from '../../types';
 
 interface AdminDashboardProps {
@@ -127,13 +131,6 @@ type AdminTab =
   | 'dashboard'
   | 'products'
   | 'sellers-products'
-  | 'lockable-settings'
-  | 'store-main-page'
-  | 'store-contacts'
-  | 'store-branding'
-  | 'public-ticker'
-  | 'seller-ticker'
-  | 'invitation-code'
   | 'orders'
   | 'withdrawals'
   | 'conversations'
@@ -141,74 +138,17 @@ type AdminTab =
   | 'customer-profiles'
   | 'seller-logins'
   | 'add-money'
-  | 'subscriptions';
-
-type LockableTabId =
-  | 'invitation-code'
-  | 'store-main-page'
   | 'store-contacts'
+  | 'new-seller-registrations'
+  | 'lockable-settings'
+  | 'store-main-page'
   | 'store-branding'
   | 'public-ticker'
   | 'seller-ticker'
+  | 'invitation-code'
   | 'subscriptions';
 
-const lockableTabsConfig: {
-  id: LockableTabId;
-  label: string;
-  icon: any;
-  lockKey: FeatureLockKey;
-  description: string;
-}[] = [
-  {
-    id: 'invitation-code',
-    label: 'Invitation Code',
-    icon: KeyRound,
-    lockKey: 'invitationCode',
-    description: '4-digit seller registration code bar',
-  },
-  {
-    id: 'store-main-page',
-    label: 'Store Main Page',
-    icon: Store,
-    lockKey: 'storeMainPage',
-    description: 'Storefront hero, banners & featured showcase options',
-  },
-  {
-    id: 'store-contacts',
-    label: 'Store Contacts & Footer',
-    icon: Phone,
-    lockKey: 'storeContacts',
-    description: 'Customer care phone, email, WhatsApp & footer details',
-  },
-  {
-    id: 'store-branding',
-    label: 'Store Name & Branding',
-    icon: Tag,
-    lockKey: 'storeBranding',
-    description: 'Marketplace store title, tagline & brand name',
-  },
-  {
-    id: 'public-ticker',
-    label: 'Public Products Ticker',
-    icon: Flame,
-    lockKey: 'publicTicker',
-    description: 'Storefront marquee ticker displaying hot deals & phones',
-  },
-  {
-    id: 'seller-ticker',
-    label: 'Seller Ticker Bar',
-    icon: Handshake,
-    lockKey: 'sellerTicker',
-    description: 'Seller dashboard marquee ticker showing partner brands',
-  },
-  {
-    id: 'subscriptions',
-    label: 'Subscription Plans',
-    icon: Award,
-    lockKey: 'subscriptions',
-    description: 'Monthly seller membership plan pricing & perks',
-  },
-];
+
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) => {
   const {
@@ -266,6 +206,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
     deleteSingleMessage,
     deleteConversationAndReset,
     deleteEntireConversation,
+    syncMessagesWithFirestore,
     listenToChatMessages,
     switchUserRole,
     loginAdmin,
@@ -383,9 +324,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // Live Feature Locks for Lockable Settings
+  // Live Feature Locks for Status
   const [featureLocks, setFeatureLocks] = useState<FeatureLockSettings>(() => getStoredFeatureLocks());
-  const [lockableSubTab, setLockableSubTab] = useState<LockableTabId>('invitation-code');
 
   // Live 1-second ticker for pending auto-reply countdown
   const [, setAutoReplyTick] = useState(0);
@@ -399,32 +339,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
       setFeatureLocks(updated);
     });
   }, []);
-
-  const isLockableTabActive = [
-    'lockable-settings',
-    'invitation-code',
-    'store-main-page',
-    'store-contacts',
-    'store-branding',
-    'public-ticker',
-    'seller-ticker',
-    'subscriptions',
-  ].includes(activeTab);
-
-  useEffect(() => {
-    const lockableIds: LockableTabId[] = [
-      'invitation-code',
-      'store-main-page',
-      'store-contacts',
-      'store-branding',
-      'public-ticker',
-      'seller-ticker',
-      'subscriptions',
-    ];
-    if (lockableIds.includes(activeTab as LockableTabId)) {
-      setLockableSubTab(activeTab as LockableTabId);
-    }
-  }, [activeTab]);
 
   const lockableFeatureKeys = Object.keys(FEATURE_LOCK_NAMES) as FeatureLockKey[];
   const lockedCount = lockableFeatureKeys.filter(
@@ -503,6 +417,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
   const [isFullScreenChat, setIsFullScreenChat] = useState(false);
   const [isAdminFloatingChatOpen, setIsAdminFloatingChatOpen] = useState(false);
   const adminTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const adminChatScrollEndRef = useRef<HTMLDivElement>(null);
+  const adminFloatingChatScrollEndRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll admin chat on message receipt or conversation switch
+  useEffect(() => {
+    adminChatScrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [liveChatMessages.length, activeConvId, activeTab]);
+
+  useEffect(() => {
+    if (isAdminFloatingChatOpen) {
+      adminFloatingChatScrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [liveChatMessages.length, isAdminFloatingChatOpen]);
 
   // Auto-resize admin textarea dynamically up to 130px
   useEffect(() => {
@@ -512,24 +439,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
       adminTextareaRef.current.style.height = `${newHeight}px`;
     }
   }, [adminChatInput]);
-
-  // Subscribe to real-time chat messages subcollection for active conversation
-  useEffect(() => {
-    if (!activeConvId) return;
-    const conv = conversations.find((c) => c.id === activeConvId);
-    const sellerId =
-      conv?.participantOneRole === 'SELLER'
-        ? conv.participantOneId
-        : conv?.participantTwoRole === 'SELLER'
-        ? conv.participantTwoId
-        : activeConvId;
-
-    if (!sellerId) return;
-    const unsub = listenToChatMessages(sellerId, (incoming) => {
-      setLiveChatMessages(incoming);
-    });
-    return () => unsub();
-  }, [activeConvId, conversations, listenToChatMessages]);
 
   // Search & Filter state
   const [productSearch, setProductSearch] = useState('');
@@ -1119,8 +1028,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
         }
       });
 
-      // If marked as deleted and no message was sent/received after deletion timestamp, omit from chat list!
-      if (isChatThreadDeleted(candidateIds, newestMsgTime)) {
+      // If marked as deleted and no message was sent/received after deletion timestamp, omit from chat list
+      // (Unless this conversation is currently being viewed/selected by admin)
+      const isCurrentlyActive =
+        Boolean(activeConvId) && (conv.id === activeConvId || candidateIds.includes(activeConvId));
+      if (!isCurrentlyActive && isChatThreadDeleted(candidateIds, newestMsgTime)) {
         return;
       }
 
@@ -1161,6 +1073,62 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
       }
     });
 
+    // Also include every registered seller so Admin can always open chat with any seller
+    sellers.forEach((seller) => {
+      const groupKey = `seller_${seller.id || seller.userId}`;
+      if (!sellerGroupMap.has(groupKey)) {
+        const sId = seller.id || seller.userId;
+        const candidateIds = [
+          sId,
+          seller.id,
+          seller.userId,
+          `conv_${seller.id}`,
+          `conv_${seller.userId}`,
+          seller.email,
+        ].filter(Boolean) as string[];
+
+        let newestMsgTime = 0;
+        let lastMsgText = '';
+        let lastRole: any = undefined;
+        messages.forEach((m) => {
+          if (
+            candidateIds.includes(m.conversationId) ||
+            candidateIds.includes(m.senderId) ||
+            ((m as any).receiverId && candidateIds.includes((m as any).receiverId))
+          ) {
+            const t = new Date(m.timestamp).getTime();
+            if (t > newestMsgTime) {
+              newestMsgTime = t;
+              lastMsgText = m.text || '';
+              lastRole = m.senderRole;
+            }
+          }
+        });
+
+        const virtConv: Conversation = {
+          id: sId,
+          type: 'SELLER_ADMIN',
+          participantOneId: sId,
+          participantOneName: seller.shopName || seller.sellerName || 'Merchant',
+          participantOneRole: 'SELLER',
+          participantTwoId: 'user_admin',
+          participantTwoName: 'Platform Support Team',
+          participantTwoRole: 'ADMIN',
+          lastMessageText: lastMsgText,
+          lastMessageTime: newestMsgTime > 0 ? new Date(newestMsgTime).toISOString() : seller.joinedDate || new Date().toISOString(),
+          lastSenderRole: lastRole,
+          unreadCountParticipantOne: 0,
+          unreadCountParticipantTwo: 0,
+        };
+
+        sellerGroupMap.set(groupKey, {
+          primaryConv: virtConv,
+          allConvIds: new Set(candidateIds),
+          sellerMatch: seller,
+        });
+      }
+    });
+
     return Array.from(sellerGroupMap.values())
       .map((g) => ({
         ...g.primaryConv,
@@ -1180,6 +1148,108 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
       return name.includes(query) || shop.includes(query) || email.includes(query);
     });
   }, [unifiedConversations, chatSearchQuery]);
+
+  const syncFirestoreRef = useRef(syncMessagesWithFirestore);
+  useEffect(() => {
+    syncFirestoreRef.current = syncMessagesWithFirestore;
+  }, [syncMessagesWithFirestore]);
+
+  // Stable candidate room IDs for the active conversation
+  const effectiveConvId = activeConvId || unifiedConversations[0]?.id || '';
+  const activeConvObj = useMemo(() => {
+    if (!effectiveConvId) return null;
+    return (
+      conversations.find((c) => c.id === effectiveConvId || (c as any).allConvIds?.includes(effectiveConvId)) ||
+      unifiedConversations.find((c) => c.id === effectiveConvId || (c as any).allConvIds?.includes(effectiveConvId)) ||
+      null
+    );
+  }, [effectiveConvId, conversations, unifiedConversations]);
+
+  const activeCandidateRoomIds = useMemo(() => {
+    if (!effectiveConvId) return [];
+    const ids = new Set<string>();
+    const cleanEffective = effectiveConvId.replace(/^conv_/, '');
+    ids.add(effectiveConvId);
+    if (cleanEffective) ids.add(cleanEffective);
+
+    if (activeConvObj) {
+      if (activeConvObj.id) {
+        ids.add(activeConvObj.id);
+        ids.add(activeConvObj.id.replace(/^conv_/, ''));
+      }
+      if (activeConvObj.participantOneId) {
+        ids.add(activeConvObj.participantOneId);
+        ids.add(activeConvObj.participantOneId.replace(/^conv_/, ''));
+      }
+      if (activeConvObj.participantTwoId && activeConvObj.participantTwoId !== 'user_admin' && activeConvObj.participantTwoId !== 'admin') {
+        ids.add(activeConvObj.participantTwoId);
+        ids.add(activeConvObj.participantTwoId.replace(/^conv_/, ''));
+      }
+      if ((activeConvObj as any).sellerMatch?.id) ids.add((activeConvObj as any).sellerMatch.id);
+      if ((activeConvObj as any).sellerMatch?.userId) ids.add((activeConvObj as any).sellerMatch.userId);
+      if ((activeConvObj as any).allConvIds && Array.isArray((activeConvObj as any).allConvIds)) {
+        (activeConvObj as any).allConvIds.forEach((id: string) => {
+          ids.add(id);
+          ids.add(id.replace(/^conv_/, ''));
+        });
+      }
+    }
+
+    return Array.from(ids).filter(
+      (id) => Boolean(id) && id !== 'user_admin' && id !== 'admin'
+    );
+  }, [effectiveConvId, activeConvObj]);
+
+  const activeRoomsKey = useMemo(() => {
+    return activeCandidateRoomIds.slice().sort().join('|');
+  }, [activeCandidateRoomIds]);
+
+  // Subscribe to real-time chat messages for active conversation using Firebase onSnapshot
+  useEffect(() => {
+    if (!effectiveConvId) return;
+
+    const chatRoomId = getSellerChatRoomId(effectiveConvId, sellers);
+
+    const unsub = subscribeToChatMessages(chatRoomId, (incoming) => {
+      setLiveChatMessages(incoming || []);
+      if (incoming && incoming.length > 0) {
+        syncFirestoreRef.current(effectiveConvId, incoming, [chatRoomId]);
+      }
+    });
+
+    // Instant cross-tab BroadcastChannel listener for 0ms deletions and incoming messages
+    let bc: BroadcastChannel | null = null;
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        bc = new BroadcastChannel('nexus_chat_channel');
+        bc.onmessage = (ev) => {
+          if (ev.data?.type === 'MESSAGE_DELETED' && ev.data.messageId) {
+            const delId = ev.data.messageId;
+            recordDeletedChatMessageId(delId);
+            setLiveChatMessages((prev) => prev.filter((m) => m.id !== delId));
+          } else if (ev.data?.type === 'NEW_CHAT_MESSAGE' && ev.data.message) {
+            const incoming: Message = ev.data.message;
+            if (
+              !isChatMessageDeleted(incoming.id) &&
+              (incoming.conversationId === chatRoomId || (incoming as any).chatId === chatRoomId)
+            ) {
+              setLiveChatMessages((prev) => {
+                if (prev.some((m) => m.id === incoming.id)) return prev;
+                return [...prev, incoming];
+              });
+            }
+          }
+        };
+      }
+    } catch {}
+
+    return () => {
+      unsub();
+      try {
+        bc?.close();
+      } catch {}
+    };
+  }, [effectiveConvId, sellers]);
 
   const totalUnreadConversationsForAdmin = useMemo(() => {
     return unifiedConversations.reduce((acc, conv) => {
@@ -1208,8 +1278,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
 
   const handleSendAdminMessage = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!adminChatInput.trim() || !activeConvId) return;
+    const textToSend = adminChatInput.trim();
+    if (!textToSend || !activeConvId) return;
 
+    const chatRoomId = getSellerChatRoomId(activeConvId, sellers);
     const matchedGroup = unifiedConversations.find(
       (c) => c.id === activeConvId || c.allConvIds?.includes(activeConvId)
     );
@@ -1217,39 +1289,39 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
       matchedGroup?.sellerMatch ||
       sellers.find(
         (s) =>
+          s.id === chatRoomId ||
+          s.userId === chatRoomId ||
           s.id === activeConvId ||
-          s.userId === activeConvId ||
-          matchedGroup?.allConvIds?.includes(s.id) ||
-          matchedGroup?.allConvIds?.includes(s.userId)
+          s.userId === activeConvId
       );
 
-    const candidateIds = new Set<string>(matchedGroup?.allConvIds || [activeConvId]);
-    if (seller) {
-      if (seller.id) {
-        candidateIds.add(seller.id);
-        candidateIds.add(`conv_${seller.id}`);
-      }
-      if (seller.userId) {
-        candidateIds.add(seller.userId);
-        candidateIds.add(`conv_${seller.userId}`);
-      }
-      if (seller.email) {
-        candidateIds.add(seller.email.toLowerCase().trim());
-      }
-    }
-
-    const targetSellerId =
-      seller?.id ||
-      seller?.userId ||
-      (activeConvId.startsWith('conv_') ? activeConvId.replace(/^conv_/, '') : activeConvId);
-
-    sendMessage(activeConvId, adminChatInput.trim(), undefined, {
+    const newMsg = sendMessage(activeConvId, textToSend, undefined, {
       senderId: 'user_admin',
       senderName: 'Platform Support Team',
       senderRole: 'ADMIN',
-      candidateIds: Array.from(candidateIds),
-      sellerId: targetSellerId,
+      sellerId: chatRoomId,
     } as any);
+
+    if (newMsg) {
+      setLiveChatMessages((prev) => {
+        if (prev.some((m) => m.id === newMsg.id)) return prev;
+        return [...prev, newMsg];
+      });
+      setTimeout(() => {
+        adminChatScrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        adminFloatingChatScrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, 50);
+    }
+
+    sendRealtimeChatMessage({
+      chatRoomId,
+      senderId: 'user_admin',
+      senderRole: 'ADMIN',
+      senderName: 'Platform Support Team',
+      text: textToSend,
+      messageId: newMsg?.id,
+      sellerProfile: seller,
+    }).catch(() => {});
 
     markConversationAsRead(activeConvId, 'ADMIN');
     setAdminChatInput('');
@@ -1271,37 +1343,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
   };
 
   const handleDeleteAndResetChat = (convId: string) => {
-    // 1. Immediately empty local live messages state so screen blanks out instantly
-    setLiveChatMessages([]);
+    // 1. If active thread is the one being deleted, clear live messages
+    if (activeConvId === convId) {
+      setLiveChatMessages([]);
+    }
 
-    // 2. Gather all candidate IDs associated with this thread / seller
+    // 2. Gather all candidate IDs associated strictly with THIS seller thread
     const targetConv = unifiedConversations.find(
       (c) => c.id === convId || (c as any).allConvIds?.includes(convId)
     );
     const allIds = new Set<string>();
-    if (convId) {
+    if (convId && convId !== 'user_admin' && convId !== 'admin') {
+      const clean = convId.replace(/^conv_/, '');
       allIds.add(convId);
-      allIds.add(convId.replace(/^conv_/, ''));
-      allIds.add(`conv_${convId.replace(/^conv_/, '')}`);
-    }
-    if (activeConvId) {
-      allIds.add(activeConvId);
-      allIds.add(activeConvId.replace(/^conv_/, ''));
-      allIds.add(`conv_${activeConvId.replace(/^conv_/, '')}`);
+      allIds.add(clean);
+      allIds.add(`conv_${clean}`);
     }
     if (targetConv) {
-      if (targetConv.id) {
+      if (targetConv.id && targetConv.id !== 'user_admin' && targetConv.id !== 'admin') {
+        const clean = targetConv.id.replace(/^conv_/, '');
         allIds.add(targetConv.id);
-        allIds.add(targetConv.id.replace(/^conv_/, ''));
-        allIds.add(`conv_${targetConv.id.replace(/^conv_/, '')}`);
+        allIds.add(clean);
+        allIds.add(`conv_${clean}`);
       }
-      if (targetConv.participantOneId) {
+      if (targetConv.participantOneId && targetConv.participantOneId !== 'user_admin' && targetConv.participantOneId !== 'admin') {
+        const clean = targetConv.participantOneId.replace(/^conv_/, '');
         allIds.add(targetConv.participantOneId);
-        allIds.add(targetConv.participantOneId.replace(/^conv_/, ''));
-      }
-      if (targetConv.participantTwoId) {
-        allIds.add(targetConv.participantTwoId);
-        allIds.add(targetConv.participantTwoId.replace(/^conv_/, ''));
+        allIds.add(clean);
       }
       if ((targetConv as any).sellerMatch?.id) {
         allIds.add((targetConv as any).sellerMatch.id);
@@ -1314,18 +1382,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
       }
       if ((targetConv as any).allConvIds && Array.isArray((targetConv as any).allConvIds)) {
         (targetConv as any).allConvIds.forEach((id: string) => {
-          allIds.add(id);
-          allIds.add(id.replace(/^conv_/, ''));
+          if (id && id !== 'user_admin' && id !== 'admin') {
+            allIds.add(id);
+            allIds.add(id.replace(/^conv_/, ''));
+          }
         });
       }
     }
 
-    const candidateList = Array.from(allIds).filter(Boolean);
+    const candidateList = Array.from(allIds).filter((id) => Boolean(id) && id !== 'user_admin' && id !== 'admin');
 
-    // Call StoreContext to remove from conversations & messages and wipe from Firestore
+    // Call StoreContext to remove ONLY this seller conversation and wipe from Firestore
     deleteConversationAndReset(convId, candidateList);
 
-    // If active conversation was deleted or matched, clear activeConvId or switch to next
+    // If active conversation was deleted or matched, switch to next remaining
     const remaining = unifiedConversations.filter(
       (c) => c.id !== convId && !(c as any).allConvIds?.some((id: string) => allIds.has(id))
     );
@@ -1338,14 +1408,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
     }
 
     setDeleteConfirmConvId(null);
-    triggerToast('Seller conversation permanently deleted from chat list and database.');
+    triggerToast('Seller conversation permanently deleted from chat list.');
   };
 
   const handleDeleteSingleMsg = (msgId: string) => {
-    // 1. Immediately drop message from local live state so it disappears instantly
+    if (!msgId) return;
+
+    // 1. Instantly record deletion in memory set and localStorage
+    recordDeletedChatMessageId(msgId);
+
+    // 2. Immediately drop message from local live state so it disappears instantly
     setLiveChatMessages((prev) => prev.filter((m) => m.id !== msgId));
 
-    // 2. Gather candidate IDs
+    // 3. Gather candidate IDs
     const currentActiveConv =
       unifiedConversations.find((c) => c.id === activeConvId || (c as any).allConvIds?.includes(activeConvId)) ||
       filteredConversations[0];
@@ -1366,8 +1441,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
   };
 
   const handleStartChatWithSeller = (seller: SellerProfile) => {
+    const targetId = seller.userId || seller.id;
+    const candidateIds = [
+      seller.id,
+      seller.userId,
+      `conv_${seller.id}`,
+      `conv_${seller.userId}`,
+      seller.email,
+    ].filter(Boolean) as string[];
+
+    restoreChatThread(targetId, candidateIds);
+    clearConversationClearedTime(targetId, candidateIds);
+
     const conv = startOrGetSupportConversation(
-      seller.userId || seller.id,
+      targetId,
       seller.shopName || seller.sellerName,
       'SELLER'
     );
@@ -1492,7 +1579,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
       const dx = curX - supportBtnDragRef.current.startX;
       const dy = curY - supportBtnDragRef.current.startY;
 
-      if (!supportBtnDragRef.current.hasMoved && Math.hypot(dx, dy) > 4) {
+      if (!supportBtnDragRef.current.hasMoved && Math.hypot(dx, dy) > 12) {
         supportBtnDragRef.current.hasMoved = true;
         setIsSupportBtnDragging(true);
       }
@@ -1551,17 +1638,57 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
     const textToSend = adminFloatingChatInput.trim();
     if (!textToSend && !adminFloatingChatImage) return;
 
-    const currentConv = conversations.find((c) => c.id === activeConvId) || conversations[0];
+    const currentConv =
+      unifiedConversations.find((c) => c.id === activeConvId || (c as any).allConvIds?.includes(activeConvId)) ||
+      conversations.find((c) => c.id === activeConvId) ||
+      unifiedConversations[0] ||
+      conversations[0];
+
     if (!currentConv) {
       triggerToast('Please select a seller conversation first.');
       return;
     }
 
-    sendMessage(currentConv.id, textToSend, adminFloatingChatImage || undefined, {
+    const chatRoomId = getSellerChatRoomId(currentConv.id, sellers);
+    const seller =
+      (currentConv as any)?.sellerMatch ||
+      sellers.find(
+        (s) =>
+          s.id === chatRoomId ||
+          s.userId === chatRoomId ||
+          s.id === currentConv.id ||
+          s.userId === currentConv.id
+      );
+
+    const newMsg = sendMessage(chatRoomId, textToSend, adminFloatingChatImage || undefined, {
       senderId: 'user_admin',
-      senderName: 'Customer Care & Admin',
+      senderName: 'Platform Support Team',
       senderRole: 'ADMIN',
-    });
+      sellerId: chatRoomId,
+    } as any);
+
+    if (newMsg) {
+      setLiveChatMessages((prev) => {
+        if (prev.some((m) => m.id === newMsg.id)) return prev;
+        return [...prev, newMsg];
+      });
+      setTimeout(() => {
+        adminChatScrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        adminFloatingChatScrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, 50);
+    }
+
+    sendRealtimeChatMessage({
+      chatRoomId,
+      senderId: 'user_admin',
+      senderRole: 'ADMIN',
+      senderName: 'Platform Support Team',
+      text: textToSend,
+      imageUrl: adminFloatingChatImage || undefined,
+      messageId: newMsg?.id,
+      sellerProfile: seller,
+    }).catch(() => {});
+
     markConversationAsRead(currentConv.id, 'ADMIN');
 
     setAdminFloatingChatInput('');
@@ -1664,11 +1791,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
       orderStatusChangeNote || undefined,
       dateToPass
     );
-    if (dateToPass) {
-      updateOrderDate(editingAssignedOrder.id, dateToPass);
-    }
-    triggerToast(`Order #${editingAssignedOrder.id} updated!`);
+    triggerToast(`Order #${editingAssignedOrder.id} updated! Status: ${orderStatusChangeVal}`);
     setEditingAssignedOrder(null);
+  };
+
+  const handleCancelAssignedOrder = (orderId: string, reason?: string) => {
+    const order = orders.find((o) => o.id === orderId);
+    if (!order) return;
+    if (order.status === 'CANCELLED') {
+      triggerToast(`Order #${orderId} is already cancelled.`);
+      return;
+    }
+    updateOrderStatus(orderId, 'CANCELLED', reason || 'Order cancelled by Platform Administrator.');
+    triggerToast(`Order #${orderId} has been cancelled.`);
+    if (editingAssignedOrder?.id === orderId) {
+      setEditingAssignedOrder(null);
+    }
   };
 
   const handleDeleteAssignedOrder = (orderId: string) => {
@@ -1737,31 +1875,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
       badgeColor: 'bg-[#F59E0B]',
     },
     { id: 'products' as AdminTab, label: 'Products', icon: Package },
-    { id: 'sellers-products' as AdminTab, label: 'Sellers Products', icon: ShoppingBag },
-    {
-      id: 'lockable-settings' as AdminTab,
-      label: 'Lockable Store Settings',
-      icon: Lock,
-      badge: `${lockedCount}/7 Locked`,
-      badgeColor: isAllLocked ? 'bg-emerald-500' : 'bg-amber-500',
-    },
+    { id: 'sellers-products' as AdminTab, label: 'Seller Products', icon: ShoppingBag },
     {
       id: 'orders' as AdminTab,
       label: 'Orders',
       icon: ShoppingCart,
-      badge: orders.length || 25,
+      badge: orders.length || undefined,
       badgeColor: 'bg-[#EF4444]',
     },
     {
       id: 'withdrawals' as AdminTab,
-      label: 'Money Withdraw',
+      label: 'Money Withdrawal',
       icon: Landmark,
       badge: pendingWithdrawals.length > 0 ? pendingWithdrawals.length : undefined,
       badgeColor: 'bg-[#F59E0B]',
     },
     {
       id: 'conversations' as AdminTab,
-      label: 'Conversations',
+      label: 'Conversation',
       icon: MessageSquare,
       badge: totalUnreadConversationsForAdmin > 0 ? totalUnreadConversationsForAdmin : undefined,
       badgeColor: 'bg-[#EF4444]',
@@ -1773,9 +1904,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
       badge: pendingSellers.length > 0 ? pendingSellers.length : undefined,
       badgeColor: 'bg-[#F59E0B]',
     },
-    { id: 'customer-profiles' as AdminTab, label: 'Customer Profiles', icon: Users },
-    { id: 'seller-logins' as AdminTab, label: 'Seller Login Sessions', icon: UserCheck },
+    { id: 'customer-profiles' as AdminTab, label: 'Customer Profile', icon: Users },
+    { id: 'seller-logins' as AdminTab, label: 'Seller Login Session', icon: UserCheck },
     { id: 'add-money' as AdminTab, label: 'Add Money', icon: PlusCircle },
+    { id: 'store-contacts' as AdminTab, label: 'Website Footer Contacts & Details', icon: Phone },
+    {
+      id: 'new-seller-registrations' as AdminTab,
+      label: 'New Seller Registrations',
+      icon: UserPlus,
+      badge: pendingSellers.length > 0 ? pendingSellers.length : undefined,
+      badgeColor: 'bg-[#F59E0B]',
+    },
   ];
 
   if (currentUser.role !== 'ADMIN') {
@@ -2173,39 +2312,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
 
           {/* Right Header Navigation - Cleaned & Focused */}
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-            {/* Chat Sound Alert Controller (Mobile & Desktop) */}
-            <div className="flex items-center gap-1 sm:gap-2 bg-slate-900/90 hover:bg-slate-850 px-2.5 sm:px-3 py-1.5 rounded-xl border border-slate-700/80 shadow-xs transition-colors">
-              <button
-                type="button"
-                onClick={handleToggleSound}
-                className={`flex items-center gap-1.5 cursor-pointer transition-colors ${
-                  soundEnabledState ? 'text-emerald-400 hover:text-emerald-300' : 'text-slate-400 hover:text-slate-200'
-                }`}
-                title={soundEnabledState ? 'Sound alerts ON - Click to mute' : 'Sound alerts MUTED - Click to unmute'}
-              >
-                {soundEnabledState ? (
-                  <div className="relative flex items-center justify-center">
-                    <Volume2 className="w-4 h-4 text-emerald-400" />
-                    <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 bg-emerald-400 rounded-full animate-ping" />
-                  </div>
-                ) : (
-                  <VolumeX className="w-4 h-4 text-slate-400" />
-                )}
-                <span className="text-xs font-bold tracking-tight">
-                  Beep: <span className={soundEnabledState ? 'text-emerald-400 font-black' : 'text-slate-400 font-semibold'}>{soundEnabledState ? 'ON' : 'OFF'}</span>
-                </span>
-              </button>
-              <span className="text-slate-700 font-light">|</span>
-              <button
-                type="button"
-                onClick={handleTestBeep}
-                className="text-[10px] font-bold text-amber-300 hover:text-amber-200 bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/20 px-2 py-0.5 rounded-md transition-all cursor-pointer"
-                title="Test notification sound on this device"
-              >
-                Test
-              </button>
-            </div>
-
             {/* Clean Logout Button */}
             <button
               type="button"
@@ -2244,8 +2350,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
           <nav className="flex-1 overflow-y-auto py-2 px-2 space-y-0.5">
             {navItems.map((item) => {
               const Icon = item.icon;
-              const isActive =
-                item.id === 'lockable-settings' ? isLockableTabActive : activeTab === item.id;
+              const isActive = activeTab === item.id;
               return (
                 <button
                   key={item.id}
@@ -2315,8 +2420,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
                 </div>
                 {navItems.map((item) => {
                   const Icon = item.icon;
-                  const isActive =
-                    item.id === 'lockable-settings' ? isLockableTabActive : activeTab === item.id;
+                  const isActive = activeTab === item.id;
                   return (
                     <button
                       key={item.id}
@@ -2391,17 +2495,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
             <div className="flex items-center gap-1.5 shrink-0">
               <button
                 type="button"
-                onClick={() => setActiveTab('invitation-code')}
-                className="flex items-center gap-1 text-[11px] font-black text-amber-300 bg-amber-400/15 border border-amber-400/30 px-2.5 py-1.5 rounded-xl transition-colors cursor-pointer"
-                title="Manage Invitation Code"
-              >
-                <KeyRound className="w-3 h-3 text-amber-400" />
-                <span>Code: {invitationCode || '5201'}</span>
-              </button>
-              <button
-                type="button"
                 onClick={() => setMobileSidebarOpen(true)}
-                className="flex items-center gap-1 text-xs font-bold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 px-2.5 py-1.5 rounded-xl transition-colors cursor-pointer"
+                className="flex items-center gap-1 text-xs font-bold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-750 px-2.5 py-1.5 rounded-xl transition-colors cursor-pointer"
               >
                 <Menu className="w-3.5 h-3.5" />
                 <span>Menu</span>
@@ -2563,476 +2658,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
                 </div>
               </div>
 
-              {/* Quick Invitation Code Banner */}
-              <div className="bg-gradient-to-r from-slate-900 via-slate-850 to-slate-900 border border-amber-400/30 rounded-2xl p-4 sm:p-5 shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div className="flex items-center gap-3.5">
-                  <div className="w-11 h-11 rounded-xl bg-amber-400/15 text-amber-400 border border-amber-400/30 flex items-center justify-center shrink-0 shadow-sm">
-                    <KeyRound className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-xs font-extrabold uppercase tracking-wider text-amber-400">
-                        Merchant Registration Invitation Code
-                      </span>
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                        ● Active in Database
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2 mt-1">
-                      <span className="font-mono text-xl sm:text-2xl font-black text-white tracking-[0.25em] bg-slate-950 px-3 py-1 rounded-lg border border-slate-800">
-                        {invitationCode || '5201'}
-                      </span>
-                      <span className="text-xs text-slate-400 hidden sm:inline">
-                        Required for all new seller registrations
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('invitation-code')}
-                    className="px-4 py-2 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-500 hover:to-amber-600 text-slate-950 font-black text-xs rounded-xl shadow-sm transition-all flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <KeyRound className="w-3.5 h-3.5" />
-                    <span>Manage Invitation Code</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Quick Store Name & Global Branding Banner */}
-              <div className="bg-gradient-to-r from-slate-900 via-slate-850 to-slate-900 border border-orange-400/30 rounded-2xl p-4 sm:p-5 shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div className="flex items-center gap-3.5">
-                  <div className="w-11 h-11 rounded-xl bg-orange-400/15 text-orange-400 border border-orange-400/30 flex items-center justify-center shrink-0 shadow-sm">
-                    <Store className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-xs font-extrabold uppercase tracking-wider text-orange-400">
-                        Platform & Store Name
-                      </span>
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                        ● Synchronized Database
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2 mt-1">
-                      <span className="font-serif text-xl sm:text-2xl font-black text-white bg-slate-950 px-3 py-1 rounded-lg border border-slate-800">
-                        {storeName || 'Zazzel'}
-                      </span>
-                      <span className="text-xs text-slate-400 hidden sm:inline">
-                        Live across storefront headers, seller dashboards & footers
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('store-branding')}
-                    className="px-4 py-2 bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 text-white font-black text-xs rounded-xl shadow-sm transition-all flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Sliders className="w-3.5 h-3.5" />
-                    <span>Change Store Name</span>
-                  </button>
-                </div>
-              </div>
-
               {/* ========================================================================= */}
               {/* SECTION: NEW SELLER REGISTRATIONS (AWAITING ADMIN APPROVAL)               */}
               {/* High-visibility section right on the main dashboard front page.           */}
-              {/* Visible until approved or rejected; once approved, disappears immediately */}
               {/* ========================================================================= */}
-              <div id="admin-pending-sellers-section" className="space-y-4">
-                {/* Section Header */}
-                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg flex flex-col md:flex-row md:items-center justify-between gap-4">
-                  <div className="flex items-start sm:items-center gap-3.5">
-                    <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 border transition-all ${
-                      pendingSellers.length > 0
-                        ? 'bg-amber-500/20 text-amber-400 border-amber-500/40 shadow-lg shadow-amber-500/10'
-                        : 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
-                    }`}>
-                      <Store className="w-6 h-6" />
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2.5 flex-wrap">
-                        <h2 className="text-base sm:text-lg font-black text-white tracking-tight">
-                          New Seller Registrations
-                        </h2>
-                        {pendingSellers.length > 0 ? (
-                          <span className="px-3 py-1 rounded-full text-xs font-black bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1.5 animate-pulse">
-                            <span className="w-2 h-2 rounded-full bg-amber-400"></span>
-                            <span>{pendingSellers.length} Awaiting Your Approval</span>
-                          </span>
-                        ) : (
-                          <span className="px-3 py-1 rounded-full text-xs font-black bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1.5">
-                            <CheckCircle2 className="w-3.5 h-3.5" />
-                            <span>All Caught Up • 0 Pending</span>
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-                        Newly registered stores appear right here on your main dashboard until approved or rejected. Approving activates their merchant portal immediately.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Header Actions */}
-                  <div className="flex items-center gap-2.5 shrink-0 flex-wrap sm:flex-nowrap">
-                    {pendingSellers.length > 0 && (
-                      <div className="relative w-full sm:w-56">
-                        <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                        <input
-                          type="text"
-                          value={pendingSellerSearch}
-                          onChange={(e) => setPendingSellerSearch(e.target.value)}
-                          placeholder="Search pending sellers..."
-                          className="w-full bg-slate-950 border border-slate-700/80 focus:border-amber-500 rounded-xl pl-8 pr-3 py-2 text-xs text-white placeholder-slate-500 outline-none transition"
-                        />
-                      </div>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => setActiveTab('seller-profiles')}
-                      className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 border border-slate-700/80 cursor-pointer"
-                    >
-                      <Eye className="w-3.5 h-3.5" />
-                      <span>All Stores ({sellers.length})</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* Empty State: When 0 pending sellers */}
-                {pendingSellers.length === 0 && (
-                  <div className="bg-slate-900/60 border border-dashed border-slate-800 rounded-2xl p-8 sm:p-10 text-center flex flex-col items-center justify-center space-y-3">
-                    <div className="w-14 h-14 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 flex items-center justify-center shadow-inner">
-                      <CheckCircle2 className="w-7 h-7" />
-                    </div>
-                    <div className="max-w-md space-y-1">
-                      <h3 className="text-sm sm:text-base font-extrabold text-white">
-                        No Pending Seller Registrations
-                      </h3>
-                      <p className="text-xs text-slate-400 leading-relaxed">
-                        All store applications have been processed. When a new seller registers on the platform, their details, credentials, and verification documents will appear here instantly for your review.
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setActiveTab('seller-profiles')}
-                      className="mt-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-1.5"
-                    >
-                      <Store className="w-3.5 h-3.5 text-[#0284C7]" />
-                      <span>View Active Sellers ({approvedSellers.length})</span>
-                    </button>
-                  </div>
-                )}
-
-                {/* List of Pending Sellers */}
-                {pendingSellers.length > 0 && (
-                  <div className="space-y-4">
-                    {filteredPendingSellers.length === 0 ? (
-                      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 text-center text-xs text-slate-400">
-                        No pending sellers match "{pendingSellerSearch}". Try clearing your search.
-                      </div>
-                    ) : (
-                      filteredPendingSellers.map((seller) => {
-                        const sellerCreatedDate = seller.joinedDate
-                          ? new Date(seller.joinedDate).toLocaleDateString('en-US', {
-                              month: 'short',
-                              day: 'numeric',
-                              year: 'numeric',
-                              hour: '2-digit',
-                              minute: '2-digit',
-                            })
-                          : 'Recent Application';
-
-                        const kycFront = seller.kycFrontImageUrl || seller.frontImage || seller.kycDocuments?.frontImageUrl;
-                        const kycBack = seller.kycBackImageUrl || seller.backImage || seller.kycDocuments?.backImageUrl;
-                        const docType = seller.kycDocumentType || seller.documentType || seller.kycDocuments?.documentType || 'ID Card';
-                        const isPassRevealed = !!revealedPasswords[seller.id];
-
-                        return (
-                          <div
-                            key={seller.id}
-                            className="bg-slate-900 border-2 border-amber-500/40 hover:border-amber-500/70 rounded-2xl p-5 sm:p-6 shadow-xl transition-all space-y-4 relative overflow-hidden"
-                          >
-                            {/* Accent Glow Strip */}
-                            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-amber-500 via-orange-500 to-amber-400"></div>
-
-                            {/* Top Details Header */}
-                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-800">
-                              <div className="flex items-center gap-3.5">
-                                <div className="w-13 h-13 rounded-2xl bg-gradient-to-br from-amber-500 to-orange-600 text-white font-black text-xl flex items-center justify-center shadow-md shrink-0">
-                                  {(seller.shopName || seller.sellerName || 'S').charAt(0).toUpperCase()}
-                                </div>
-                                <div>
-                                  <div className="flex items-center gap-2 flex-wrap">
-                                    <div className="flex items-center gap-1.5 font-mono text-base sm:text-lg font-black text-sky-400 tracking-tight">
-                                      <Mail className="w-4 h-4 text-sky-400 shrink-0" />
-                                      <span className="select-all">{seller.email}</span>
-                                    </div>
-                                    <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black bg-amber-500/20 text-amber-300 border border-amber-500/40 uppercase tracking-wider">
-                                      ● Pending Approval
-                                    </span>
-                                  </div>
-                                  <div className="flex items-center gap-3 text-xs text-slate-400 mt-1 flex-wrap">
-                                    <span className="text-slate-200 font-semibold">
-                                      {seller.shopName || 'Store'} • {seller.sellerName || 'Merchant'}
-                                    </span>
-                                    <span>•</span>
-                                    <span className="flex items-center gap-1 text-slate-400">
-                                      <Clock className="w-3.5 h-3.5 text-amber-400" />
-                                      <span>Applied: {sellerCreatedDate}</span>
-                                    </span>
-                                  </div>
-                                </div>
-                              </div>
-
-                              <div className="flex items-center gap-2 self-start sm:self-center">
-                                <span className="text-[11px] font-mono text-slate-500 bg-slate-950 px-2.5 py-1 rounded-lg border border-slate-800">
-                                  ID: {seller.id.slice(0, 12)}
-                                </span>
-                              </div>
-                            </div>
-
-                            {/* Middle Information Grid */}
-                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5 text-xs">
-                              {/* Contact Information */}
-                              <div className="bg-slate-950/80 border border-slate-800/80 rounded-xl p-3.5 space-y-2">
-                                <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
-                                  <Mail className="w-3.5 h-3.5 text-[#38BDF8]" />
-                                  <span>Contact Details</span>
-                                </div>
-                                <div className="space-y-1.5">
-                                  <div className="flex items-center justify-between text-slate-200">
-                                    <span className="text-slate-400">Email:</span>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        if (navigator?.clipboard) {
-                                          navigator.clipboard.writeText(seller.email);
-                                          triggerToast('Email copied to clipboard!');
-                                        }
-                                      }}
-                                      className="font-medium text-white hover:text-amber-400 transition flex items-center gap-1 cursor-pointer"
-                                      title="Copy email"
-                                    >
-                                      <span>{seller.email}</span>
-                                      <Copy className="w-3 h-3 text-slate-500" />
-                                    </button>
-                                  </div>
-                                  <div className="flex items-center justify-between text-slate-200">
-                                    <span className="text-slate-400">Phone:</span>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        if (navigator?.clipboard && seller.phone) {
-                                          navigator.clipboard.writeText(seller.phone);
-                                          triggerToast('Phone number copied to clipboard!');
-                                        }
-                                      }}
-                                      className="font-medium text-white hover:text-amber-400 transition flex items-center gap-1 cursor-pointer"
-                                      title="Copy phone"
-                                    >
-                                      <span>{seller.phone || 'N/A'}</span>
-                                      <Copy className="w-3 h-3 text-slate-500" />
-                                    </button>
-                                  </div>
-                                  <div className="flex items-center justify-between text-slate-200">
-                                    <span className="text-slate-400">Location:</span>
-                                    <span className="text-slate-300">
-                                      {seller.city ? `${seller.city}${seller.country ? `, ${seller.country}` : ''}` : (seller.country || 'Online Store')}
-                                    </span>
-                                  </div>
-                                </div>
-                              </div>
-
-                              {/* Credentials & Payout Details */}
-                              <div className="bg-slate-950/80 border border-slate-800/80 rounded-xl p-3.5 space-y-2">
-                                <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
-                                  <KeyRound className="w-3.5 h-3.5 text-amber-400" />
-                                  <span>Credentials & Payout</span>
-                                </div>
-                                <div className="space-y-1.5">
-                                  <div className="flex items-center justify-between">
-                                    <span className="text-slate-400">Password:</span>
-                                    <div className="flex items-center gap-1.5 font-mono text-xs">
-                                      <span className="text-amber-300 font-bold">
-                                        {isPassRevealed ? (seller.password || 'Not Set') : '••••••••••••'}
-                                      </span>
-                                      <button
-                                        type="button"
-                                        onClick={() => togglePasswordVisibility(seller.id)}
-                                        className="p-1 text-slate-400 hover:text-white rounded transition cursor-pointer"
-                                        title={isPassRevealed ? 'Hide Password' : 'Show Password'}
-                                      >
-                                        {isPassRevealed ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                                      </button>
-                                      {seller.password && (
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            navigator.clipboard.writeText(seller.password!);
-                                            triggerToast('Password copied to clipboard!');
-                                          }}
-                                          className="p-1 text-slate-400 hover:text-amber-300 rounded transition cursor-pointer"
-                                          title="Copy Password"
-                                        >
-                                          <Copy className="w-3.5 h-3.5" />
-                                        </button>
-                                      )}
-                                    </div>
-                                  </div>
-                                  <div className="flex items-center justify-between text-slate-200">
-                                    <span className="text-slate-400">Method:</span>
-                                    <span className="text-slate-300 font-semibold">{seller.withdrawalMethod || 'Bank Transfer'}</span>
-                                  </div>
-                                  <div className="flex items-center justify-between text-slate-200">
-                                    <span className="text-slate-400">Details:</span>
-                                    <span className="text-slate-300 truncate max-w-[140px]" title={seller.payoutDetails}>
-                                      {seller.payoutDetails || 'Auto-connected'}
-                                    </span>
-                                  </div>
-                                </div>
-                              </div>
-
-                              {/* KYC Documents Preview */}
-                              <div className="bg-slate-950/80 border border-slate-800/80 rounded-xl p-3.5 space-y-2 sm:col-span-2 lg:col-span-1">
-                                <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center justify-between">
-                                  <span className="flex items-center gap-1.5">
-                                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                                    <span>KYC Verification</span>
-                                  </span>
-                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-500/20 text-blue-300 border border-blue-500/30">
-                                    {docType}
-                                  </span>
-                                </div>
-                                <div className="flex items-center gap-2">
-                                  {kycFront ? (
-                                    <div
-                                      onClick={() => {
-                                        setKycInspectSeller(seller);
-                                        setKycInspectSide('front');
-                                      }}
-                                      className="flex-1 group relative rounded-lg overflow-hidden border border-slate-700 bg-slate-900 cursor-pointer aspect-video flex items-center justify-center"
-                                      title="Click to view Front ID"
-                                    >
-                                      <img
-                                        src={kycFront}
-                                        alt="Front KYC"
-                                        className="w-full h-full object-cover group-hover:scale-105 transition"
-                                      />
-                                      <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition text-white gap-1 text-[10px] font-bold">
-                                        <ZoomIn className="w-3 h-3" />
-                                        <span>Front</span>
-                                      </div>
-                                    </div>
-                                  ) : (
-                                    <div className="flex-1 bg-slate-900 rounded-lg p-2 text-center text-[10px] text-slate-500 border border-slate-800">
-                                      Front Attached
-                                    </div>
-                                  )}
-
-                                  {kycBack ? (
-                                    <div
-                                      onClick={() => {
-                                        setKycInspectSeller(seller);
-                                        setKycInspectSide('back');
-                                      }}
-                                      className="flex-1 group relative rounded-lg overflow-hidden border border-slate-700 bg-slate-900 cursor-pointer aspect-video flex items-center justify-center"
-                                      title="Click to view Back ID"
-                                    >
-                                      <img
-                                        src={kycBack}
-                                        alt="Back KYC"
-                                        className="w-full h-full object-cover group-hover:scale-105 transition"
-                                      />
-                                      <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition text-white gap-1 text-[10px] font-bold">
-                                        <ZoomIn className="w-3 h-3" />
-                                        <span>Back</span>
-                                      </div>
-                                    </div>
-                                  ) : (
-                                    <div className="flex-1 bg-slate-900 rounded-lg p-2 text-center text-[10px] text-slate-500 border border-slate-800">
-                                      Back Attached
-                                    </div>
-                                  )}
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* Action Buttons Toolbar */}
-                            <div className="pt-3 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-3">
-                              <div className="flex items-center gap-2.5 flex-wrap">
-                                {/* APPROVE BUTTON: Green, highly visible, immediately disappears upon click */}
-                                <button
-                                  type="button"
-                                  onClick={() => handleApproveSeller(seller)}
-                                  className="px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-white font-extrabold rounded-xl text-xs flex items-center gap-2 shadow-lg shadow-emerald-600/20 hover:scale-102 active:scale-98 transition-all cursor-pointer"
-                                  title="Approve and activate this store"
-                                >
-                                  <Check className="w-4 h-4 stroke-[3]" />
-                                  <span>Approve & Activate Store</span>
-                                </button>
-
-                                {/* REJECT BUTTON: Red, opens rejection modal */}
-                                <button
-                                  type="button"
-                                  onClick={() => handleRejectSeller(seller)}
-                                  className="px-4 py-2.5 bg-rose-600/20 hover:bg-rose-600 text-rose-300 hover:text-white border border-rose-500/40 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer"
-                                  title="Reject this seller application"
-                                >
-                                  <X className="w-4 h-4 stroke-[2.5]" />
-                                  <span>Reject Application</span>
-                                </button>
-                              </div>
-
-                              <div className="flex items-center gap-2 flex-wrap">
-                                {/* Inspect KYC Lightbox */}
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setKycInspectSeller(seller);
-                                    setKycInspectSide('both');
-                                  }}
-                                  className="px-3.5 py-2 bg-slate-800 hover:bg-slate-750 text-sky-400 border border-sky-500/30 rounded-xl font-bold text-xs flex items-center gap-1.5 transition cursor-pointer"
-                                >
-                                  <ZoomIn className="w-3.5 h-3.5" />
-                                  <span>Inspect Documents</span>
-                                </button>
-
-                                {/* Start Live Chat */}
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    handleStartChatWithSeller(seller);
-                                    setActiveTab('conversations');
-                                  }}
-                                  className="px-3.5 py-2 bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700 rounded-xl font-bold text-xs flex items-center gap-1.5 transition cursor-pointer"
-                                >
-                                  <MessageSquare className="w-3.5 h-3.5 text-amber-400" />
-                                  <span>Chat</span>
-                                </button>
-
-                                {/* Full Profile */}
-                                <button
-                                  type="button"
-                                  onClick={() => setSelectedSellerDetail(seller)}
-                                  className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl font-bold text-xs flex items-center gap-1.5 transition border border-slate-700 cursor-pointer"
-                                >
-                                  <Eye className="w-3.5 h-3.5" />
-                                  <span>Full Profile</span>
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })
-                    )}
-                  </div>
-                )}
-              </div>
+              <PendingSellersManager
+                pendingSellers={pendingSellers}
+                sellers={sellers}
+                approvedSellers={approvedSellers}
+                handleApproveSeller={handleApproveSeller}
+                handleRejectSeller={handleRejectSeller}
+                handleStartChatWithSeller={handleStartChatWithSeller}
+                setSelectedSellerDetail={setSelectedSellerDetail}
+                setKycInspectSeller={setKycInspectSeller}
+                setKycInspectSide={setKycInspectSide}
+                setActiveTab={setActiveTab}
+                triggerToast={triggerToast}
+              />
 
               {/* Website Footer Contacts Quick Action Banner */}
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-md">
@@ -3060,67 +2702,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
                 >
                   <Phone className="w-4 h-4" />
                   <span>Change Footer Contacts</span>
-                </button>
-              </div>
-
-              {/* Public Products Ticker Quick Action Banner (Storefront) */}
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-md">
-                <div className="flex items-center gap-3.5">
-                  <div className="w-11 h-11 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-400 flex items-center justify-center shrink-0">
-                    <Flame className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-extrabold text-white flex items-center gap-2">
-                      <span>Public Storefront Products Ticker</span>
-                      <span className="text-[10px] bg-amber-500/20 text-amber-300 font-bold px-2 py-0.5 rounded-full border border-amber-500/30">
-                        Unclickable Marquee
-                      </span>
-                      <span className="text-[10px] bg-emerald-500/20 text-emerald-400 font-bold px-2 py-0.5 rounded-full border border-emerald-500/30">
-                        Live
-                      </span>
-                    </h3>
-                    <p className="text-xs text-slate-400 mt-0.5">
-                      Add and manage trending hardware products (Phones, Laptops, Graphic Cards, etc.) gliding on the main store homepage.
-                    </p>
-                  </div>
-                </div>
-                <button
-                  id="admin-manage-public-ticker-btn"
-                  type="button"
-                  onClick={() => setActiveTab('public-ticker')}
-                  className="w-full sm:w-auto px-4 py-2.5 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-black rounded-xl text-xs flex items-center justify-center gap-2 cursor-pointer transition-all shadow-md shrink-0 active:scale-95"
-                >
-                  <Flame className="w-4 h-4 fill-slate-950" />
-                  <span>Manage Public Ticker</span>
-                </button>
-              </div>
-
-              {/* Seller Dashboard Partner Ticker Quick Action Banner */}
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-md">
-                <div className="flex items-center gap-3.5">
-                  <div className="w-11 h-11 rounded-xl bg-amber-400/10 border border-amber-400/30 text-amber-400 flex items-center justify-center shrink-0">
-                    <Handshake className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-extrabold text-white flex items-center gap-2">
-                      <span>Seller Dashboard Partner Ticker Bar</span>
-                      <span className="text-[10px] bg-emerald-500/20 text-emerald-400 font-bold px-2 py-0.5 rounded-full border border-emerald-500/30">
-                        Firebase Live Sync
-                      </span>
-                    </h3>
-                    <p className="text-xs text-slate-400 mt-0.5">
-                      Configure the scrolling announcement marquee (Amazon, DHL, FedEx, Shopify, Stripe, etc.) shown below the seller dashboard header.
-                    </p>
-                  </div>
-                </div>
-                <button
-                  id="admin-manage-seller-ticker-btn"
-                  type="button"
-                  onClick={() => setActiveTab('seller-ticker')}
-                  className="w-full sm:w-auto px-4 py-2.5 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-black rounded-xl text-xs flex items-center justify-center gap-2 cursor-pointer transition-all shadow-md shrink-0 active:scale-95"
-                >
-                  <Handshake className="w-4 h-4" />
-                  <span>Manage Partner Ticker</span>
                 </button>
               </div>
             </div>
@@ -3704,8 +3285,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
                                   ${(order.totalSellerEarning || (order.totalAmount * 0.21)).toFixed(2)}
                                 </td>
                                 <td className="py-3.5 px-4">
-                                  <span className="inline-block px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 text-slate-700 lowercase">
-                                    {(order.status || '').toLowerCase()}
+                                  <span className={`inline-block px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
+                                    order.status === 'CANCELLED'
+                                      ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                                      : order.status === 'DELIVERED'
+                                      ? 'bg-emerald-50 text-emerald-700'
+                                      : order.status === 'PROCESSING' || order.status === 'PICKED_BY_SELLER' || order.status === 'ON_THE_WAY'
+                                      ? 'bg-blue-50 text-blue-700'
+                                      : 'bg-slate-100 text-slate-700'
+                                  }`}>
+                                    {(order.status || '').toLowerCase().replace(/_/g, ' ')}
                                   </span>
                                 </td>
                                 <td className="py-3.5 px-4 text-center">
@@ -3729,6 +3318,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
                                     >
                                       <Edit2 className="w-4 h-4" />
                                     </button>
+                                    {order.status !== 'CANCELLED' && (
+                                      <button
+                                        onClick={() => handleCancelAssignedOrder(order.id)}
+                                        className="p-1 text-rose-500 hover:bg-rose-50 rounded transition-colors cursor-pointer"
+                                        title="Cancel Order"
+                                      >
+                                        <XCircle className="w-4 h-4" />
+                                      </button>
+                                    )}
                                     <button
                                       onClick={() => handleDeleteAssignedOrder(order.id)}
                                       className="p-1 text-red-500 hover:bg-red-50 rounded transition-colors cursor-pointer"
@@ -3759,8 +3357,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
                                 <span className="font-mono font-bold text-xs text-[#0284C7]">{order.id}</span>
                                 <div className="text-[11px] text-slate-400 mt-0.5">{formatOrderDateTime(order.createdAt)}</div>
                               </div>
-                              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-slate-100 text-slate-700 capitalize">
-                                {order.status?.toLowerCase() || 'pending'}
+                              <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
+                                order.status === 'CANCELLED'
+                                  ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                                  : order.status === 'DELIVERED'
+                                  ? 'bg-emerald-50 text-emerald-700'
+                                  : order.status === 'PROCESSING' || order.status === 'PICKED_BY_SELLER' || order.status === 'ON_THE_WAY'
+                                  ? 'bg-blue-50 text-blue-700'
+                                  : 'bg-slate-100 text-slate-700'
+                              }`}>
+                                {(order.status || 'pending').toLowerCase().replace(/_/g, ' ')}
                               </span>
                             </div>
 
@@ -3781,10 +3387,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
                             </div>
 
                             {/* Mobile Actions */}
-                            <div className="flex items-center justify-end gap-2 pt-1 border-t border-slate-100">
+                            <div className="flex items-center justify-end gap-1.5 pt-1 border-t border-slate-100">
                               <button
                                 onClick={() => setViewingAssignedOrder(order)}
-                                className="px-3 py-1.5 bg-sky-50 text-[#0284C7] rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer"
+                                className="px-2.5 py-1.5 bg-sky-50 text-[#0284C7] rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer"
                               >
                                 <Eye className="w-3.5 h-3.5" />
                                 <span>View</span>
@@ -3796,11 +3402,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
                                   setOrderStatusChangeNote('');
                                   setOrderEditDateTime(formatForDateTimeLocal(order.createdAt));
                                 }}
-                                className="px-3 py-1.5 bg-slate-100 text-slate-700 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer"
+                                className="px-2.5 py-1.5 bg-slate-100 text-slate-700 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer"
                               >
                                 <Edit2 className="w-3.5 h-3.5" />
                                 <span>Status</span>
                               </button>
+                              {order.status !== 'CANCELLED' && (
+                                <button
+                                  onClick={() => handleCancelAssignedOrder(order.id)}
+                                  className="px-2.5 py-1.5 bg-rose-50 text-rose-700 hover:bg-rose-100 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer border border-rose-200"
+                                  title="Cancel Order"
+                                >
+                                  <XCircle className="w-3.5 h-3.5" />
+                                  <span>Cancel</span>
+                                </button>
+                              )}
                               <button
                                 onClick={() => handleDeleteAssignedOrder(order.id)}
                                 className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg cursor-pointer"
@@ -3820,169 +3436,46 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
           })()}
 
           {/* ========================================================= */}
-          {/* UNIFIED HUB: ALL 7 LOCKABLE STORE SETTINGS & MODULES        */}
+          {/* TAB 11: WEBSITE FOOTER CONTACTS & DETAILS                 */}
           {/* ========================================================= */}
-          {isLockableTabActive && (
-            <div className="space-y-6 animate-in fade-in duration-200">
-              {/* Header Banner with Lock All / Unlock All and Status */}
-              <div className="bg-gradient-to-r from-slate-900 via-slate-850 to-slate-900 border border-slate-800 rounded-2xl p-5 sm:p-6 shadow-xl relative overflow-hidden">
-                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2.5 flex-wrap">
-                      <div className="p-2 rounded-xl bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                        <Lock className="w-5 h-5" />
-                      </div>
-                      <h2 className="text-xl font-black text-white tracking-tight">
-                        Lockable Store Settings & Modules
-                      </h2>
-                      <span
-                        className={`px-2.5 py-0.5 rounded-full text-xs font-bold border ${
-                          isAllLocked
-                            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                            : 'bg-amber-500/10 text-amber-400 border-amber-500/30'
-                        }`}
-                      >
-                        {lockedCount}/7 Modules Locked
-                      </span>
-                    </div>
-                    <p className="text-xs text-slate-400 max-w-2xl mt-1">
-                      All 7 static store configuration modules are consolidated here in one single hub. Locked modules operate in zero-read/zero-write offline mode to preserve your Firebase Spark Free-Tier limits. Unlock any module whenever you need live cloud synchronization.
-                    </p>
+          {activeTab === 'store-contacts' && (
+            <div className="space-y-6">
+              <StoreContactsManager onNavigate={onNavigate} />
+            </div>
+          )}
+
+          {/* ========================================================= */}
+          {/* TAB 12: NEW SELLER REGISTRATIONS                         */}
+          {/* ========================================================= */}
+          {activeTab === 'new-seller-registrations' && (
+            <div className="space-y-6">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2.5">
+                    <h2 className="text-xl font-black text-slate-900">New Seller Registrations</h2>
+                    <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-500/10 text-amber-600 border border-amber-500/20">
+                      {pendingSellers.length} Pending Approval
+                    </span>
                   </div>
-
-                  {/* Global Action Buttons */}
-                  <div className="flex items-center gap-2.5 shrink-0 flex-wrap">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAllFeaturesLock(true);
-                        triggerToast('🔒 All 7 store modules locked for maximum free-tier savings.');
-                      }}
-                      className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-black text-xs rounded-xl transition-colors flex items-center gap-1.5 shadow-sm cursor-pointer"
-                    >
-                      <Lock className="w-3.5 h-3.5" />
-                      <span>Lock All (0 Reads/Writes)</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAllFeaturesLock(false);
-                        triggerToast('🔓 All store modules unlocked. Live Firebase sync active.');
-                      }}
-                      className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-bold text-xs rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <Unlock className="w-3.5 h-3.5 text-amber-400" />
-                      <span>Unlock All (Live Sync)</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* Sub-navigation tabs for the 7 lockable options */}
-                <div className="mt-5 pt-4 border-t border-slate-800/80 flex items-center gap-2 overflow-x-auto pb-1 scrollbar-thin">
-                  {lockableTabsConfig.map((tab) => {
-                    const isSelected = lockableSubTab === tab.id;
-                    const isModuleLocked = Boolean(featureLocks.isGlobalLocked || featureLocks[tab.lockKey]);
-                    const TabIcon = tab.icon;
-
-                    return (
-                      <button
-                        key={tab.id}
-                        type="button"
-                        onClick={() => {
-                          setLockableSubTab(tab.id);
-                          setActiveTab(tab.id);
-                        }}
-                        className={`px-3 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 shrink-0 cursor-pointer ${
-                          isSelected
-                            ? 'bg-amber-400 text-slate-950 shadow-md font-black'
-                            : 'bg-slate-800/90 text-slate-300 hover:bg-slate-800 hover:text-white border border-slate-750'
-                        }`}
-                      >
-                        <TabIcon className="w-3.5 h-3.5" />
-                        <span>{tab.label}</span>
-                        <span
-                          className={`text-[10px] px-1.5 py-0.5 rounded-md font-bold ${
-                            isSelected
-                              ? isModuleLocked
-                                ? 'bg-slate-950/20 text-slate-950'
-                                : 'bg-emerald-950/20 text-emerald-950 font-black'
-                              : isModuleLocked
-                              ? 'bg-emerald-500/20 text-emerald-400'
-                              : 'bg-amber-500/20 text-amber-300'
-                          }`}
-                        >
-                          {isModuleLocked ? '🔒 Locked' : '⚡ Live'}
-                        </span>
-                      </button>
-                    );
-                  })}
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Review and verify new merchant applications, KYC documents, and business details
+                  </p>
                 </div>
               </div>
 
-              {/* Current Module Quick Bar with Individual Lock / Unlock Toggle */}
-              {(() => {
-                const currentTabConfig = lockableTabsConfig.find((t) => t.id === lockableSubTab) || lockableTabsConfig[0];
-                const isCurLocked = Boolean(featureLocks.isGlobalLocked || featureLocks[currentTabConfig.lockKey]);
-
-                return (
-                  <div className="bg-slate-900 border border-slate-800 rounded-xl px-4 py-3 flex items-center justify-between gap-3 flex-wrap">
-                    <div className="flex items-center gap-2.5">
-                      <span className="text-xs font-bold text-slate-300">
-                        Active Module: <span className="text-amber-400 font-extrabold">{currentTabConfig.label}</span>
-                      </span>
-                      <span
-                        className={`text-[11px] px-2 py-0.5 rounded-full font-bold border ${
-                          isCurLocked
-                            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                            : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
-                        }`}
-                      >
-                        {isCurLocked ? '🔒 Locked (0 Reads/Writes Consumed)' : '⚡ Unlocked (Live Firebase Sync)'}
-                      </span>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSingleFeatureLock(currentTabConfig.lockKey, !isCurLocked);
-                        triggerToast(
-                          !isCurLocked
-                            ? `🔒 ${currentTabConfig.label} locked (0 reads/writes)`
-                            : `🔓 ${currentTabConfig.label} unlocked for live sync`
-                        );
-                      }}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
-                        isCurLocked
-                          ? 'bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700'
-                          : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black'
-                      }`}
-                    >
-                      {isCurLocked ? (
-                        <>
-                          <Unlock className="w-3.5 h-3.5 text-amber-400" />
-                          <span>Unlock This Module</span>
-                        </>
-                      ) : (
-                        <>
-                          <Lock className="w-3.5 h-3.5" />
-                          <span>Lock This Module</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-                );
-              })()}
-
-              {/* The Embedded Manager Component for the Active Sub-tab */}
-              <div className="bg-transparent">
-                {lockableSubTab === 'invitation-code' && <InvitationCodeManager onNavigate={onNavigate} />}
-                {lockableSubTab === 'store-main-page' && <StoreMainPageManager onNavigate={onNavigate} />}
-                {lockableSubTab === 'store-contacts' && <StoreContactsManager onNavigate={onNavigate} />}
-                {lockableSubTab === 'store-branding' && <StoreBrandingManager onNavigate={onNavigate} />}
-                {lockableSubTab === 'public-ticker' && <PublicProductTickerManager onNavigate={onNavigate} />}
-                {lockableSubTab === 'seller-ticker' && <SellerTickerManager onNavigate={onNavigate} />}
-                {lockableSubTab === 'subscriptions' && <SubscriptionPlanManager onNavigate={onNavigate} />}
-              </div>
+              <PendingSellersManager
+                pendingSellers={pendingSellers}
+                sellers={sellers}
+                approvedSellers={approvedSellers}
+                handleApproveSeller={handleApproveSeller}
+                handleRejectSeller={handleRejectSeller}
+                handleStartChatWithSeller={handleStartChatWithSeller}
+                setSelectedSellerDetail={setSelectedSellerDetail}
+                setKycInspectSeller={setKycInspectSeller}
+                setKycInspectSide={setKycInspectSide}
+                setActiveTab={setActiveTab}
+                triggerToast={triggerToast}
+              />
             </div>
           )}
 
@@ -4403,7 +3896,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
                             // Search Filter
                             if (withdrawalSearch.trim()) {
                               const query = withdrawalSearch.toLowerCase().trim();
-                              const s = sellers.find((sel) => sel.id === w.sellerId);
+                              const s = sellers.find(
+                                (sel) =>
+                                  sel.id === w.sellerId ||
+                                  sel.userId === w.sellerId ||
+                                  (sel.email && w.sellerEmail && sel.email.toLowerCase() === w.sellerEmail.toLowerCase())
+                              );
                               const sellerNameMatch = (s?.sellerName || w.sellerName || '').toLowerCase().includes(query);
                               const shopNameMatch = (s?.shopName || '').toLowerCase().includes(query);
                               const emailMatch = (w.sellerEmail || s?.email || '').toLowerCase().includes(query);
@@ -4439,7 +3937,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
                         }
 
                         return filteredWithdrawals.map((w) => {
-                          const s = sellers.find((sel) => sel.id === w.sellerId);
+                          const s = sellers.find(
+                            (sel) =>
+                              sel.id === w.sellerId ||
+                              sel.userId === w.sellerId ||
+                              (sel.email && w.sellerEmail && sel.email.toLowerCase() === w.sellerEmail.toLowerCase())
+                          );
                           const sellerEmail = w.sellerEmail || s?.email || 'N/A';
                           const sellerDisplayName = s?.sellerName || w.sellerName || s?.shopName || 'Seller';
                           const paymentAccountText = w.payoutAccount || w.payoutDetails || 'No details provided';
@@ -4582,7 +4085,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
                         }
                         if (withdrawalSearch.trim()) {
                           const query = withdrawalSearch.toLowerCase().trim();
-                          const s = sellers.find((sel) => sel.id === w.sellerId);
+                          const s = sellers.find(
+                            (sel) =>
+                              sel.id === w.sellerId ||
+                              sel.userId === w.sellerId ||
+                              (sel.email && w.sellerEmail && sel.email.toLowerCase() === w.sellerEmail.toLowerCase())
+                          );
                           const sellerNameMatch = (s?.sellerName || w.sellerName || '').toLowerCase().includes(query);
                           const shopNameMatch = (s?.shopName || '').toLowerCase().includes(query);
                           const emailMatch = (w.sellerEmail || s?.email || '').toLowerCase().includes(query);
@@ -4608,7 +4116,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
                     }
 
                     return filteredWithdrawals.map((w) => {
-                      const s = sellers.find((sel) => sel.id === w.sellerId);
+                      const s = sellers.find(
+                        (sel) =>
+                          sel.id === w.sellerId ||
+                          sel.userId === w.sellerId ||
+                          (sel.email && w.sellerEmail && sel.email.toLowerCase() === w.sellerEmail.toLowerCase())
+                      );
                       const sellerEmail = w.sellerEmail || s?.email || 'N/A';
                       const sellerDisplayName = s?.sellerName || w.sellerName || s?.shopName || 'Seller';
                       const paymentAccountText = w.payoutAccount || w.payoutDetails || 'No details provided';
@@ -4734,26 +4247,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-100 border border-slate-200 text-xs text-slate-700">
-                    <button
-                      onClick={handleToggleSound}
-                      className="flex items-center gap-1.5 font-bold cursor-pointer hover:text-[#0284C7] transition-colors"
-                      title={soundEnabledState ? 'Click to mute sound alerts' : 'Click to enable sound alerts'}
-                    >
-                      {soundEnabledState ? <Volume2 className="w-4 h-4 text-emerald-600" /> : <VolumeX className="w-4 h-4 text-slate-400" />}
-                      <span>
-                        Beep Alert: <b className={soundEnabledState ? 'text-emerald-600 font-black' : 'text-slate-500'}>{soundEnabledState ? 'ON' : 'OFF'}</b>
-                      </span>
-                    </button>
-                    <span className="text-slate-300">|</span>
-                    <button
-                      onClick={handleTestBeep}
-                      className="px-2 py-0.5 bg-sky-50 hover:bg-sky-100 text-[#0284C7] rounded-md font-bold text-[11px] cursor-pointer transition-colors"
-                      title="Test beep sound on this device"
-                    >
-                      🔊 Test Beep
-                    </button>
-                  </div>
                   <button
                     onClick={() => setShowSellerPicker(true)}
                     className="px-3.5 py-2 bg-[#0284C7] hover:bg-[#0369A1] text-white rounded-xl font-bold text-xs flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
@@ -5015,24 +4508,57 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
                         : currentActiveConv.id;
 
                     const targetConvIds = new Set<string>((currentActiveConv as any)?.allConvIds || [currentActiveConv.id]);
-                    if (activeSellerId) {
-                      targetConvIds.add(activeSellerId);
-                      targetConvIds.add(activeSellerId.replace(/^conv_/, ''));
-                      targetConvIds.add(`conv_${activeSellerId.replace(/^conv_/, '')}`);
+                    const cleanCurrentId = (currentActiveConv.id || '').replace(/^conv_/, '');
+                    targetConvIds.add(currentActiveConv.id);
+                    if (cleanCurrentId) {
+                      targetConvIds.add(cleanCurrentId);
+                      targetConvIds.add(`conv_${cleanCurrentId}`);
                     }
-                    if ((currentActiveConv as any)?.sellerMatch?.id) targetConvIds.add((currentActiveConv as any).sellerMatch.id);
-                    if ((currentActiveConv as any)?.sellerMatch?.userId) targetConvIds.add((currentActiveConv as any).sellerMatch.userId);
+                    if (activeSellerId) {
+                      const cleanSellerId = activeSellerId.replace(/^conv_/, '');
+                      targetConvIds.add(activeSellerId);
+                      targetConvIds.add(cleanSellerId);
+                      targetConvIds.add(`conv_${cleanSellerId}`);
+                    }
+                    if ((currentActiveConv as any)?.sellerMatch?.id) {
+                      const sId = (currentActiveConv as any).sellerMatch.id;
+                      targetConvIds.add(sId);
+                      targetConvIds.add(sId.replace(/^conv_/, ''));
+                      targetConvIds.add(`conv_${sId.replace(/^conv_/, '')}`);
+                    }
+                    if ((currentActiveConv as any)?.sellerMatch?.userId) {
+                      const uId = (currentActiveConv as any).sellerMatch.userId;
+                      targetConvIds.add(uId);
+                      targetConvIds.add(uId.replace(/^conv_/, ''));
+                      targetConvIds.add(`conv_${uId.replace(/^conv_/, '')}`);
+                    }
 
                     const activeConvMessagesMap = new Map<string, any>();
                     messages
-                      .filter(
-                        (m) =>
+                      .filter((m) => {
+                        if (!m || !m.id || isChatMessageDeleted(m.id)) return false;
+                        const cleanConv = (m.conversationId || '').replace(/^conv_/, '');
+                        const cleanSender = (m.senderId || '').replace(/^conv_/, '');
+                        const cleanReceiver = ((m as any).receiverId || '').replace(/^conv_/, '');
+                        const hasCandidateMatch =
+                          Array.isArray((m as any).candidateIds) &&
+                          (m as any).candidateIds.some(
+                            (cid: string) => targetConvIds.has(cid) || targetConvIds.has(cid.replace(/^conv_/, ''))
+                          );
+
+                        return (
                           targetConvIds.has(m.conversationId) ||
+                          targetConvIds.has(cleanConv) ||
                           targetConvIds.has(m.senderId) ||
-                          ((m as any).receiverId && targetConvIds.has((m as any).receiverId))
-                      )
+                          targetConvIds.has(cleanSender) ||
+                          ((m as any).receiverId && (targetConvIds.has((m as any).receiverId) || targetConvIds.has(cleanReceiver))) ||
+                          hasCandidateMatch
+                        );
+                      })
                       .forEach((m) => activeConvMessagesMap.set(m.id, m));
-                    liveChatMessages.forEach((m) => activeConvMessagesMap.set(m.id, m));
+                    liveChatMessages
+                      .filter((m) => m && m.id && !isChatMessageDeleted(m.id))
+                      .forEach((m) => activeConvMessagesMap.set(m.id, m));
                     const activeConvMessages = Array.from(activeConvMessagesMap.values()).sort(
                       (a, b) => {
                         const diff = getMessageTimestampMs(a) - getMessageTimestampMs(b);
@@ -5194,20 +4720,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
                                         {/* Admin CAN see message timestamp */}
                                         <span>{formatAdminMessageDateTime(msgTime)}</span>
 
-                                        {/* Admin CAN see Seen / Read status */}
-                                        {isAdmin && (
-                                          <span className="flex items-center gap-0.5 ml-0.5">
-                                            {msg.isRead ? (
-                                              <span className="text-[#53bdeb] flex items-center gap-0.5 font-bold" title="Seen by seller">
-                                                <CheckCheck className="w-3.5 h-3.5 stroke-[2.5]" />
-                                                <span>Seen</span>
-                                              </span>
-                                            ) : (
-                                              <span className="text-slate-400 flex items-center gap-0.5" title="Delivered to seller">
-                                                <Check className="w-3.5 h-3.5" />
-                                                <span>Delivered</span>
-                                              </span>
-                                            )}
+                                        {/* Simple Seen Status for Admin (Delivered indicator removed) */}
+                                        {isAdmin && msg.isRead && (
+                                          <span className="flex items-center gap-0.5 ml-0.5 text-[#53bdeb] font-bold" title="Seen by seller">
+                                            <CheckCheck className="w-3.5 h-3.5 stroke-[2.5]" />
+                                            <span>Seen</span>
                                           </span>
                                         )}
                                       </div>
@@ -5228,6 +4745,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
                               );
                             })
                           )}
+                          <div ref={adminChatScrollEndRef} />
                         </div>
 
                         {/* Quick Reply Chips */}
@@ -5383,7 +4901,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
                       </div>
                       <button
                         type="button"
-                        className="px-3 py-1.5 bg-[#0284C7] text-white text-xs font-bold rounded-lg opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 shadow-xs"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleStartChatWithSeller(s);
+                        }}
+                        className="px-3 py-1.5 bg-[#0284C7] hover:bg-[#0369A1] text-white text-xs font-bold rounded-lg flex items-center gap-1 shadow-xs cursor-pointer transition-colors"
                       >
                         <MessageSquare className="w-3.5 h-3.5" />
                         <span>Chat</span>
@@ -7739,16 +7261,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
                 <button
                   type="button"
                   onClick={handleSaveEditedOrderStatus}
-                  className="flex-1 py-2.5 bg-[#0284C7] hover:bg-sky-600 text-white rounded-xl font-bold text-xs transition-colors"
+                  className="flex-1 py-2.5 bg-[#0284C7] hover:bg-sky-600 text-white rounded-xl font-bold text-xs transition-colors cursor-pointer"
                 >
                   Save Status
                 </button>
+                {editingAssignedOrder.status !== 'CANCELLED' && (
+                  <button
+                    type="button"
+                    onClick={() => handleCancelAssignedOrder(editingAssignedOrder.id, orderStatusChangeNote || 'Order cancelled by Admin.')}
+                    className="px-3.5 py-2.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl font-bold text-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+                    title="Directly cancel this order"
+                  >
+                    <XCircle className="w-3.5 h-3.5 text-rose-600" />
+                    <span>Cancel Order</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setEditingAssignedOrder(null)}
-                  className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-xs"
+                  className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-xs cursor-pointer"
                 >
-                  Cancel
+                  Close
                 </button>
               </div>
             </div>
@@ -8267,24 +7800,55 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
                     : currentFloatingConv.id;
 
                 const targetFloatingConvIds = new Set<string>((currentFloatingConv as any)?.allConvIds || [currentFloatingConv.id]);
-                if (floatingSellerId) {
-                  targetFloatingConvIds.add(floatingSellerId);
-                  targetFloatingConvIds.add(floatingSellerId.replace(/^conv_/, ''));
-                  targetFloatingConvIds.add(`conv_${floatingSellerId.replace(/^conv_/, '')}`);
+                const cleanFloatCurrentId = (currentFloatingConv.id || '').replace(/^conv_/, '');
+                targetFloatingConvIds.add(currentFloatingConv.id);
+                if (cleanFloatCurrentId) {
+                  targetFloatingConvIds.add(cleanFloatCurrentId);
+                  targetFloatingConvIds.add(`conv_${cleanFloatCurrentId}`);
                 }
-                if ((currentFloatingConv as any)?.sellerMatch?.id) targetFloatingConvIds.add((currentFloatingConv as any).sellerMatch.id);
-                if ((currentFloatingConv as any)?.sellerMatch?.userId) targetFloatingConvIds.add((currentFloatingConv as any).sellerMatch.userId);
+                if (floatingSellerId) {
+                  const cleanSellerId = floatingSellerId.replace(/^conv_/, '');
+                  targetFloatingConvIds.add(floatingSellerId);
+                  targetFloatingConvIds.add(cleanSellerId);
+                  targetFloatingConvIds.add(`conv_${cleanSellerId}`);
+                }
+                if ((currentFloatingConv as any)?.sellerMatch?.id) {
+                  const sId = (currentFloatingConv as any).sellerMatch.id;
+                  targetFloatingConvIds.add(sId);
+                  targetFloatingConvIds.add(sId.replace(/^conv_/, ''));
+                }
+                if ((currentFloatingConv as any)?.sellerMatch?.userId) {
+                  const uId = (currentFloatingConv as any).sellerMatch.userId;
+                  targetFloatingConvIds.add(uId);
+                  targetFloatingConvIds.add(uId.replace(/^conv_/, ''));
+                }
 
                 const floatingMessagesMap = new Map<string, any>();
                 messages
-                  .filter(
-                    (m) =>
+                  .filter((m) => {
+                    if (!m || !m.id || isChatMessageDeleted(m.id)) return false;
+                    const cleanConv = (m.conversationId || '').replace(/^conv_/, '');
+                    const cleanSender = (m.senderId || '').replace(/^conv_/, '');
+                    const cleanReceiver = ((m as any).receiverId || '').replace(/^conv_/, '');
+                    const hasCandidateMatch =
+                      Array.isArray((m as any).candidateIds) &&
+                      (m as any).candidateIds.some(
+                        (cid: string) => targetFloatingConvIds.has(cid) || targetFloatingConvIds.has(cid.replace(/^conv_/, ''))
+                      );
+
+                    return (
                       targetFloatingConvIds.has(m.conversationId) ||
+                      targetFloatingConvIds.has(cleanConv) ||
                       targetFloatingConvIds.has(m.senderId) ||
-                      ((m as any).receiverId && targetFloatingConvIds.has((m as any).receiverId))
-                  )
+                      targetFloatingConvIds.has(cleanSender) ||
+                      ((m as any).receiverId && (targetFloatingConvIds.has((m as any).receiverId) || targetFloatingConvIds.has(cleanReceiver))) ||
+                      hasCandidateMatch
+                    );
+                  })
                   .forEach((m) => floatingMessagesMap.set(m.id, m));
-                liveChatMessages.forEach((m) => floatingMessagesMap.set(m.id, m));
+                liveChatMessages
+                  .filter((m) => m && m.id && !isChatMessageDeleted(m.id))
+                  .forEach((m) => floatingMessagesMap.set(m.id, m));
                 const threadMessages = Array.from(floatingMessagesMap.values()).sort(
                   (a, b) => {
                     const diff = getMessageTimestampMs(a) - getMessageTimestampMs(b);
@@ -8502,7 +8066,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
                 How to fix in 1 minute in Firebase Console:
               </p>
               <ol className="list-decimal list-inside space-y-1 text-slate-300 leading-relaxed">
-                <li>Open <a href="https://console.firebase.google.com/project/new-zazzle/firestore/rules" target="_blank" rel="noreferrer" className="text-sky-400 underline font-bold">Firebase Console &gt; Firestore &gt; Rules</a></li>
+                <li>Open <a href="https://console.firebase.google.com/project/zazzel-shopping-store-c7bc8/firestore/rules" target="_blank" rel="noreferrer" className="text-sky-400 underline font-bold">Firebase Console &gt; Firestore &gt; Rules</a></li>
                 <li>Copy the rules code below and paste it into the editor</li>
                 <li>Click <strong className="text-emerald-400">Publish</strong></li>
               </ol>
